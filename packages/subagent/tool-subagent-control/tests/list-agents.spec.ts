@@ -152,6 +152,7 @@ describe('dsh-tool-subagent-control/list-agents', () => {
         mode: 'continuable',
         activity: 'inactive',
         hasChildren: false,
+        specialization: 'character-agent',
       },
       {
         kind: 'child',
@@ -182,7 +183,7 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     // `ready` is the resumable counterpart to a live `running` record, not a
     // claim that the child's conversation ended with a result to collect.
     expect(text(result)).toBe(
-      `${started.childId} [ready] — real child\n`
+      `${started.childId} [ready] specialization=character-agent — real child\n`
       + 'running-child [running] — still working\n'
       + 'waiting-child [idle] — waiting on descendants\n'
       + 'broken-child [diagnostic: corrupt]',
@@ -229,11 +230,17 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     // so its inactive status must not send the model looking for a result.
     expect(schema?.description).toContain('you are told when one finishes')
     expect(schema?.description).toContain('resumable, not terminal')
+    // The workstream label and optional specialization are the durable identity
+    // fields the model matches before resuming a child with send_message.
+    expect(schema?.description).toContain('workstream')
+    expect(schema?.description).toContain('specialization')
     // The enum is the closed vocabulary the model renders, so pin it rather than
     // scanning prose that legitimately reads "not to poll for completion".
     const variants = ctx.tools.get('list_agents')?.output.schema.items?.oneOf ?? []
     const child = variants.find(variant => variant.properties?.kind?.enum?.includes('child'))
     expect(child?.properties?.status?.enum).toEqual(['running', 'idle', 'ready'])
+    expect(child?.properties?.workstream?.type).toBe('string')
+    expect(child?.properties?.specialization?.type).toBe('string')
   })
 
   it('fails loud when invoked without a calling agent', async () => {

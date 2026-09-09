@@ -23,7 +23,7 @@ Use the workflow tool ONLY when the user explicitly asks for a workflow or for l
 
 Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. Each Ralph round starts a fresh child with no conversation seed and uses the shared workspace as durable memory. Completion and blockers are worker reports, not independent evaluation. Use same-session goal tools for ordinary long-running objectives, and plain subagents or workflows for bounded delegation and fan-out.
 
-Use subagent in the background by default. Start independent delegations together in one assistant message and continue useful work while they run. Set `run_in_background: false` only when your next action depends on that subagent's result. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message.
+Use subagent in the background by default. Start independent delegations together in one assistant message and continue useful work while they run. Set `run_in_background: false` only when your next action depends on that subagent's result. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message. Every call starts a new child conversation. For follow-up work in a domain you already delegated, reuse the existing child instead of starting another: `list_agents` recalls your continuable children by id and workstream label, and `send_message` resumes the matching child's conversation.
 
 ## Writing code for run_code
 
@@ -104,7 +104,7 @@ interface ToolArgsMap {
     /** Max wait in milliseconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum. */
     timeout_ms?: number;
   } & Record<string, JsonValue>;
-  /** List your continuable background subagents by durable id and label. Use it to recall which ones you started, not to poll for completion — you are told when one finishes. Status comes from the live registry: running means the agent is working right now, idle means it is loaded but between turns (it may be waiting on agents it started), and ready means it exists only in storage — resumable, not terminal, and not a result waiting to be collected; a `send_message` starts a new turn on the same conversation, and a direct child remains a `send_message` candidate in every status. The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail. Children that could not be read are reported as diagnostics instead of being silently dropped. Scope `descendants` walks the whole tree below you in stable pre-order, annotating each entry with its durable direct-parent session id and depth. You may use `send_message` only for depth-1 entries; deeper entries are candidates for `interrupt_agent` only. */
+  /** List your continuable background subagents by durable id and workstream label. Use it to recall which ones you started — especially before delegating follow-up work, so you can resume a matching child with `send_message` instead of starting a new one — not to poll for completion: you are told when one finishes. The workstream is the child's durable line-of-work label; the optional specialization marks the child kind a deployment declared (e.g. `character-agent`), never a permission. Status comes from the live registry: running means the agent is working right now, idle means it is loaded but between turns (it may be waiting on agents it started), and ready means it exists only in storage — resumable, not terminal, and not a result waiting to be collected; a `send_message` starts a new turn on the same conversation, and a direct child remains a `send_message` candidate in every status. The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail. Children that could not be read are reported as diagnostics instead of being silently dropped. Scope `descendants` walks the whole tree below you in stable pre-order, annotating each entry with its durable direct-parent session id and depth. You may use `send_message` only for depth-1 entries; deeper entries are candidates for `interrupt_agent` only. */
   list_agents: {
     /** children (default) lists direct children only; descendants walks the complete tree below you. */
     scope?: "children" | "descendants";
@@ -125,7 +125,7 @@ interface ToolArgsMap {
     /** Maximum number of lines to return. Defaults to 2000. */
     limit?: number;
   } & Record<string, JsonValue>;
-  /** Send a message to a background subagent by its subagent id, continuing the same conversation. It becomes the subagent's next turn: if it is still working, the message waits until its current turn finishes, so it cannot redirect work already underway. This call returns no answer from the subagent — only confirmation that the message was delivered — so use it to give it more work. A failure means the message was NOT delivered. */
+  /** Send a message to a background subagent by its subagent id, continuing the same conversation. It becomes the subagent's next turn: if it is still working, the message waits until its current turn finishes, so it cannot redirect work already underway. This call returns no answer from the subagent — only confirmation that the message was delivered — so use it to give it more work. A failure means the message was NOT delivered. Prefer this over starting a new `subagent` when the work continues the same line of work as an existing child (match the child via `list_agents`): the child keeps the context and loaded setup it already built. */
   send_message: {
     /** The subagent id returned when the background subagent was started. */
     subagent_id: string;
@@ -137,10 +137,10 @@ interface ToolArgsMap {
     /** The exact skill name from the available skills list. */
     name: string;
   } & Record<string, JsonValue>;
-  /** Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation. This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result. */
+  /** Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation. This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result. Each call starts a NEW child conversation. For follow-up work in a domain you already delegated, reuse the existing child instead of starting another: `list_agents` recalls your continuable children by id and workstream label, and `send_message` resumes the matching child's conversation. Start a new child only for an independent line of work — continuing an unrelated conversation wastes its context and repeats its setup. */
   subagent: {
-    /** A short (3-5 word) description of the delegated task, for display. */
-    description: string;
+    /** A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work. */
+    workstream: string;
     /** The complete, self-contained task for the subagent. It does not share this conversation's context, so include everything it needs. */
     prompt: string;
     /** Whether to run in the background and return a durable subagent id immediately. Defaults to true. Set false to wait for the result when your next action depends on it. */
@@ -148,8 +148,8 @@ interface ToolArgsMap {
   } & Record<string, JsonValue>;
   /** Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation's context — a follow-up analysis, a review, a continuation — without consuming this conversation's context for the work itself. You receive its result, not its intermediate steps. This call waits for the subagent and returns its result. */
   subagent_fork: {
-    /** A short (3-5 word) description of the delegated task, for display. */
-    description: string;
+    /** A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work. */
+    workstream: string;
     /** The task for the subagent. It already sees this conversation's completed turns, so build on them freely and state only what is new. */
     prompt: string;
   } & Record<string, JsonValue>;
@@ -324,7 +324,8 @@ interface ToolOutputMap {
   list_agents: ({
     kind: "child";
     id: string;
-    label: string;
+    workstream: string;
+    specialization?: string;
     status: "running" | "idle" | "ready";
     parent?: string;
     depth?: number;

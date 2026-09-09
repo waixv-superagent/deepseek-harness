@@ -2,7 +2,8 @@
  * Read-only enumeration of durable subagent children and descendant trees
  * straight from the live session store and optional session persistence — no
  * query service. Candidates come from one live-preferred corpus; each child's
- * mode/label is the registered `subagent` projection unit's value, resolved
+ * mode/label/specialization is the registered `subagent` projection unit's
+ * value, resolved
  * down a three-rung ladder: the registry's watermark cache for a live child,
  * a durable projection-cache row when it serves an own-suffix identity (the
  * seq gate), and one persistence inspection folded through the registry
@@ -61,12 +62,16 @@ export type SubagentListEntry =
       readonly mode: 'one-shot'
       /** Optional durable creation label from the child's descriptor. */
       readonly label?: string
+      /** Optional durable specialization annotation from the child's descriptor. */
+      readonly specialization?: string
     }
     | {
       /** A resumable conversation. */
       readonly mode: 'continuable'
       /** Durable creation label from the child's descriptor. */
       readonly label: string
+      /** Optional durable specialization annotation from the child's descriptor. */
+      readonly specialization?: string
     }
   )
   | {
@@ -421,6 +426,7 @@ function childRow(
       id,
       mode: 'one-shot',
       ...identity.label !== undefined ? { label: identity.label } : {},
+      ...identity.specialization !== undefined ? { specialization: identity.specialization } : {},
       activity,
       hasChildren,
     }
@@ -429,6 +435,7 @@ function childRow(
       id,
       mode: 'continuable',
       label: identity.label,
+      ...identity.specialization !== undefined ? { specialization: identity.specialization } : {},
       activity,
       hasChildren,
     }

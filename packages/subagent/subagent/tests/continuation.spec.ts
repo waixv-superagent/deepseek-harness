@@ -283,6 +283,25 @@ describe('SubagentRuntime.startContinuable', () => {
     expect(loaded.meta.origin).toBe('subagent')
   })
 
+  it('records a caller-declared specialization in the pre-turn descriptor', async () => {
+    const { ctx, parent } = await setup([textResponse('answer')])
+    const spec = startSpec(parent)
+    const started = await ctx.subagents.startContinuable({
+      ...spec,
+      request: { ...spec.request, specialization: 'character-agent' },
+    })
+    await waitNoActivation(ctx, started.childId)
+
+    const loaded = await ctx.sessionPersistence.load(started.childId)
+    const descriptor = loaded.events.find(event => event.type === 'subagent/descriptor')
+    expect(descriptor?.data).toMatchObject({
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'continuable',
+      label: 'child task',
+      specialization: 'character-agent',
+    })
+  })
+
   it('rolls the child back completely when the caller signal aborts before acceptance', async () => {
     const { ctx, parent } = await setup([textResponse('unused')])
     const controller = new AbortController()

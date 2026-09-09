@@ -8,7 +8,7 @@
 
 `interrupt_agent(agent_id)` 将 `exec.agent` 作为 `ctx.subagents.interrupt()` 的确切在线 ancestor 授权传入：目标可以是直接 child 或更深的后代，由服务——而不是本工具——依据目标 Activation 记录的 lineage 校验调用方。只有目标的当前轮次会停止（`keepInbox`）：已排队的消息保持暂停直到之后的 `send_message`，已发布的后代继续运行，child 也仍可接受后续消息。调用在停止请求被接受后立即返回，不等待目标完全停稳；目标不存在或已结算是被接受的 no-op，而 self、sibling、陈旧与非 ancestor 调用方会成为出错结果。
 
-`list_agents` 接受一个可选的 `scope` 参数，会从调用它的 agent 推导根 id，并且不使用 cursor，将服务目录投影为可继续 child。默认的 `children` scope 读取 `ctx.subagents.listChildren()`；`descendants` 读取 `ctx.subagents.listDescendants()`，其单份语料的遍历会穿过普通会话与一次性 child，并按稳定 pre-order 以 `parent=<id> depth=<n>` 渲染保留下来的条目。`parent` 注释是持久化直接 parent 会话 id，可能指向输出中省略的普通会话。对于调用本工具的 agent，只有 depth-1 child 条目可作为 `send_message` 候选；更深的 child 条目只能作为 `interrupt_agent` 候选。状态来自在线 Agent 注册表：`running`（driver 活跃）、`idle`（驻留但处于轮次之间，可能在等待它启动的 agent）或 `ready`（仅存于存储，表示可恢复而非终态）。服务结果还包含由会话支撑的一次性 subagent，以供 UI 等消费方使用；但这些条目无法接受 `send_message`，因此会从这个模型工具中排除。diagnostic 仍然可见，并在 descendants scope 中带有位置。持久化身份和模式来自每个子 agent 的描述符，消息送达时的鉴权和 Activation 所有权检查仍归服务负责。
+`list_agents` 接受一个可选的 `scope` 参数，会从调用它的 agent 推导根 id，并且不使用 cursor，将服务目录投影为可继续 child。默认的 `children` scope 读取 `ctx.subagents.listChildren()`；`descendants` 读取 `ctx.subagents.listDescendants()`，其单份语料的遍历会穿过普通会话与一次性 child，并按稳定 pre-order 以 `parent=<id> depth=<n>` 渲染保留下来的条目。`parent` 注释是持久化直接 parent 会话 id，可能指向输出中省略的普通会话。对于调用本工具的 agent，只有 depth-1 child 条目可作为 `send_message` 候选；更深的 child 条目只能作为 `interrupt_agent` 候选。每个 child 条目都携带其持久化的 `workstream`（工作线）标签——创建它的工具给出的工作线名称——以及在委派实例声明了 `specialization` 时携带该子 agent 类别标注；这两项就是模型在续接已有 child 做后续工作前要匹配的字段。状态来自在线 Agent 注册表：`running`（driver 活跃）、`idle`（驻留但处于轮次之间，可能在等待它启动的 agent）或 `ready`（仅存于存储，表示可恢复而非终态）。服务结果还包含由会话支撑的一次性 subagent，以供 UI 等消费方使用；但这些条目无法接受 `send_message`，因此会从这个模型工具中排除。diagnostic 仍然可见，并在 descendants scope 中带有位置。持久化身份和模式来自每个子 agent 的描述符，消息送达时的鉴权和 Activation 所有权检查仍归服务负责。
 
 ## 模型体验
 
@@ -16,7 +16,7 @@
 
 #### 模型看到的内容
 
-已生成的 [schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-subagent-control)：`send_message` 包含 `subagent_id` 和 `message`，说明消息会成为 subagent 的下一个轮次、本次调用不会返回 subagent 的回答，以及失败即表示消息未送达；`interrupt_agent` 包含 `agent_id`，说明只有当前轮次会停止、已排队消息保持暂停、后代继续运行，以及接受先于实际停止；`list_agents` 包含可选的 `scope` 枚举。
+已生成的 [schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-subagent-control)：`send_message` 包含 `subagent_id` 和 `message`，说明消息会成为 subagent 的下一个轮次、本次调用不会返回 subagent 的回答、失败即表示消息未送达，并说明当工作延续某条已有工作线时应优先使用本调用（先通过 `list_agents` 匹配 child）而不是再开一个新的 subagent；`interrupt_agent` 包含 `agent_id`，说明只有当前轮次会停止、已排队消息保持暂停、后代继续运行，以及接受先于实际停止；`list_agents` 包含可选的 `scope` 枚举，其描述把列表定位为委派前的召回步骤——续接 child 前先匹配工作线标签或 specialization——而不是完成状态轮询。
 
 #### Token 影响
 
@@ -58,7 +58,7 @@
 
 #### 模型看到的内容
 
-按稳定目录顺序，每个可继续 child 占一行：渲染为 `<id> [<status>] — <label>`（`running` 表示 driver 活跃，`idle` 表示驻留但处于轮次之间，`ready` 表示仅存于存储；可恢复而非终态，也不表示有结果等待收集——处于该状态的直接 child 可通过 `send_message` 恢复），另为无法读取的候选项渲染 `<id> [diagnostic: <reason>]`（`corrupt`、`unsupported` 或 `unavailable`）。`descendants` scope 会在每行 label 破折号之前插入 ` parent=<id> depth=<n>`，按 pre-order 排列。一次性 child 会被有意排除；`(no subagents)` 表示投影后没有留下可继续 child 或 diagnostic。诊断信息绝不会暴露描述符内容。
+按稳定目录顺序，每个可继续 child 占一行：渲染为 `<id> [<status>] — <workstream>`，当创建它的委派实例声明了 specialization 时，在状态之后插入 ` specialization=<kind>`（`running` 表示 driver 活跃，`idle` 表示驻留但处于轮次之间，`ready` 表示仅存于存储；可恢复而非终态，也不表示有结果等待收集——处于该状态的直接 child 可通过 `send_message` 恢复），另为无法读取的候选项渲染 `<id> [diagnostic: <reason>]`（`corrupt`、`unsupported` 或 `unavailable`）。`descendants` scope 会在每行 label 破折号之前插入 ` parent=<id> depth=<n>`，按 pre-order 排列。一次性 child 会被有意排除；`(no subagents)` 表示投影后没有留下可继续 child 或 diagnostic。诊断信息绝不会暴露描述符内容。
 
 #### Token 影响
 

@@ -1,7 +1,9 @@
 /**
  * The durable subagent-child descriptor: the versioned, model-hidden
  * `subagent/descriptor` session event that identifies every session-backed
- * subagent and records whether it is one-shot or continuable. Continuable
+ * subagent and records whether it is one-shot or continuable. Both modes may
+ * carry the caller-declared `specialization` identity annotation (a configured
+ * child kind, e.g. `character-agent`) alongside the creation label; continuable
  * descriptors additionally preserve the declared composition required for
  * cold resume. Providers append it turn-enclosed in the child's initial turn.
  *
@@ -44,7 +46,7 @@ declare module '@deepseek-ai/dsh-session/types' {
  * Supporting another composition input is a deliberate version change, never
  * an implicit extra field.
  */
-export const SUBAGENT_DESCRIPTOR_VERSION = 2
+export const SUBAGENT_DESCRIPTOR_VERSION = 3
 
 /** Fields shared by every supported `subagent/descriptor` payload. */
 interface SubagentDescriptorBase {
@@ -65,6 +67,8 @@ export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {
    * replaying parent tool results or exposing the child prompt.
    */
   readonly label?: string
+  /** Caller-declared specialization persisted as a durable identity annotation. */
+  readonly specialization?: string
 }
 
 /** A session-backed subagent whose declared composition supports cold resume. */
@@ -72,6 +76,8 @@ export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBas
   readonly mode: 'continuable'
   /** The initial delegation's short `description`, used for durable enumeration. */
   readonly label: string
+  /** Caller-declared specialization persisted as a durable identity annotation. */
+  readonly specialization?: string
   /** Resolved child `agentOptions.provider`, when one was declared. */
   readonly agentProvider?: string
   /** Resolved child `agentOptions.model`, when one was declared. */
@@ -98,15 +104,19 @@ interface SubagentDescriptorInputBase {
 /** Input for a one-shot child's durable identity. */
 export interface OneShotSubagentDescriptorInput extends SubagentDescriptorInputBase {
   readonly mode: 'one-shot'
-  /** Optional initial delegation `description` used as the durable creation label. */
+  /** Optional initial delegation `workstream` used as the durable creation label. */
   readonly label?: string
+  /** Optional caller-declared specialization for durable enumeration. */
+  readonly specialization?: string
 }
 
 /** Input for a continuable child's durable identity and resumable composition. */
 export interface ContinuableSubagentDescriptorInput extends SubagentDescriptorInputBase {
   readonly mode: 'continuable'
-  /** Initial delegation `description` used for durable enumeration. */
+  /** Initial delegation `workstream` used for durable enumeration. */
   readonly label: string
+  /** Optional caller-declared specialization for durable enumeration. */
+  readonly specialization?: string
   /** Requested child `agentOptions.provider`. */
   readonly agentProvider?: string
   /** Requested child `agentOptions.model`. */
@@ -127,6 +137,7 @@ const DESCRIPTOR_BASE_KEYS = [
   'mode',
   'provider',
   'label',
+  'specialization',
 ] as const
 const ONE_SHOT_DESCRIPTOR_KEYS = new Set(DESCRIPTOR_BASE_KEYS)
 const CONTINUABLE_DESCRIPTOR_KEYS = new Set([
@@ -218,17 +229,20 @@ function parseSubagentDescriptor(value: unknown): SubagentDescriptorData | undef
   }
   if (mode === 'one-shot') {
     const label = optionalString(value, 'label')
+    const specialization = optionalString(value, 'specialization')
     return {
       version: SUBAGENT_DESCRIPTOR_VERSION,
       mode,
       provider,
       ...label !== undefined ? { label } : {},
+      ...specialization !== undefined ? { specialization } : {},
     }
   }
   const label = value['label']
   if (typeof label !== 'string') {
     throw new Error('persisted subagent descriptor label must be a string')
   }
+  const specialization = optionalString(value, 'specialization')
   const agentProvider = optionalString(value, 'agentProvider')
   const agentModel = optionalString(value, 'agentModel')
   const persona = optionalString(value, 'persona')
@@ -240,6 +254,7 @@ function parseSubagentDescriptor(value: unknown): SubagentDescriptorData | undef
     mode,
     provider,
     label,
+    ...specialization !== undefined ? { specialization } : {},
     ...agentProvider !== undefined ? { agentProvider } : {},
     ...agentModel !== undefined ? { agentModel } : {},
     ...persona !== undefined ? { persona } : {},
@@ -275,12 +290,14 @@ export function snapshotSubagentDescriptor(input: SubagentDescriptorInput): Suba
       mode: input.mode,
       provider: input.provider,
       ...input.label !== undefined ? { label: input.label } : {},
+      ...input.specialization !== undefined ? { specialization: input.specialization } : {},
     }
     : {
       version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: input.mode,
       provider: input.provider,
       label: input.label,
+      ...input.specialization !== undefined ? { specialization: input.specialization } : {},
       ...input.agentProvider !== undefined ? { agentProvider: input.agentProvider } : {},
       ...input.agentModel !== undefined ? { agentModel: input.agentModel } : {},
       ...input.persona !== undefined ? { persona: input.persona } : {},

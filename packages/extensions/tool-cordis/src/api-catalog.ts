@@ -1826,7 +1826,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>',
-        description: 'Enumerate the parent\'s direct session-backed subagents without loading or resuming an Agent and without any query service: the listing merges the live session store with optional session persistence (live-preferred) and serves each child\'s durable mode/label from the registered `subagent` projection unit down a three-rung ladder — the registry\'s watermark snapshot for a live child; for a cold one, a durable projection-cache row when the optional cache serves an own-suffix identity (its `seq` gate proves the value postdates the fork seed, where a child\'s own descriptor is immutable once appended), else one persistence inspection folded through the registry. The projection fold is the single classification authority; per-child diagnostics relay a fold that served no identity or a failed inspection, never a list-time descriptor parse. Absent persistence, enumeration is live-only (a cold child cannot be resumed then either, so its absence is capability absence, not an error). This service consults no Agent registrations, Activations, or providers.\n\nEvery persistence read receives `signal`, and the listing rechecks cancellation around each of those awaits. Read rejections that settle after an abort become a stable `SubagentError` with code `CANCELLED`.',
+        description: 'Enumerate the parent\'s direct session-backed subagents without loading or resuming an Agent and without any query service: the listing merges the live session store with optional session persistence (live-preferred) and serves each child\'s durable mode/label/specialization from the registered `subagent` projection unit down a three-rung ladder — the registry\'s watermark snapshot for a live child; for a cold one, a durable projection-cache row when the optional cache serves an own-suffix identity (its `seq` gate proves the value postdates the fork seed, where a child\'s own descriptor is immutable once appended), else one persistence inspection folded through the registry. The projection fold is the single classification authority; per-child diagnostics relay a fold that served no identity or a failed inspection, never a list-time descriptor parse. Absent persistence, enumeration is live-only (a cold child cannot be resumed then either, so its absence is capability absence, not an error). This service consults no Agent registrations, Activations, or providers.\n\nEvery persistence read receives `signal`, and the listing rechecks cancellation around each of those awaits. Read rejections that settle after an abort become a stable `SubagentError` with code `CANCELLED`.',
         parameters: [{ name: 'parentSessionId', description: 'parent session whose direct children are listed.' }, { name: 'signal', description: 'caller-owned cancellation forwarded to persistence reads and observed around every read await.' }],
         returns: 'children and per-child diagnostics ordered by `createdAt`, then id.',
         throws: ['{@link SubagentError} when the projection registry or the session store is not mounted, or the caller cancels the listing.'],
@@ -3151,7 +3151,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ContinuableSubagentDescriptorData',
-    declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n}',
+    declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly specialization?: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n}',
   },
   {
     name: 'CordisDynamicPackageId',
@@ -3803,7 +3803,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OneShotSubagentDescriptorData',
-    declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n}',
+    declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n    readonly specialization?: string;\n}',
   },
   {
     name: 'PermissionSelect',
@@ -4519,7 +4519,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly specialization?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n}',
   },
   {
     name: 'SubagentStopReason',

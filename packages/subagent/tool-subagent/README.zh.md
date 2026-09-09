@@ -26,6 +26,7 @@
 | `persona` | 每个子 agent 独立的 persona；要求提供方具备 `persona` 能力。 |
 | `toolFilter` | 每个子 agent 独立的全局工具限制；要求提供方具备 `toolFilter` 能力。 |
 | `maxDepth` | 绝对委派深度上限，默认 `3`（`0` 禁止委派）；数值上限要求 `depthLimit` 能力，缺失时挂载失败。对于预算由子 harness 拥有的进程外提供方，`'provider-managed'` 不发送上限。工具在达到上限时仍然可见；每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。 |
+| `specialization` | 固定的子 agent 类别标注（如 `character-agent`），会随本实例启动的每个子 agent 持久化，并由 `list_agents` 展示。它是由部署方拥有的展示元数据，不含路由、唯一性或授权语义；加载时校验为 1–64 个小写字母、数字或连字符，且以字母开头。 |
 
 ## 并发
 
@@ -37,7 +38,7 @@
 
 #### 模型看到的内容
 
-当提供方存在时，以当前实例配置的名称公开已生成的默认 [`subagent` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-subagent)。提供方是否继承上下文会改变工具描述和提示词描述。启用后台模式会添加 `run_in_background`：可继续模式会记录其默认值为 `true`、运行时结算通知与显式前台覆盖；一次性模式会记录其默认值为 `false`，以及用 `job_output` 收集或用 `job_kill` 停止的 job id。当工具在本次组装的作用域中可见时，一个 `tool:<toolName>` 系统提示词 section 会指示模型同时启动相互独立的可继续委派、在它们运行时继续工作，并且仅当下一步动作依赖结果时选择前台；工具限制会同时移除其 schema 和这段指引。
+当提供方存在时，以当前实例配置的名称公开已生成的默认 [`subagent` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-subagent)。模型会为每次委派填写必填的 `workstream` 参数——这是稳定持久、并作为子 agent 在 `list_agents` 中的持久身份的「工作线」标签，而非自由发挥的动作描述。提供方是否继承上下文会改变工具描述和提示词描述。启用后台模式会添加 `run_in_background`：可继续模式会记录其默认值为 `true`、运行时结算通知与显式前台覆盖；一次性模式会记录其默认值为 `false`，以及用 `job_output` 收集或用 `job_kill` 停止的 job id。当工具在本次组装的作用域中可见时，一个 `tool:<toolName>` 系统提示词 section 会指示模型同时启动相互独立的可继续委派、在它们运行时继续工作，并且仅当下一步动作依赖结果时选择前台；它还会告诉模型每次调用都会新建一个子 agent 对话，因此在已委派过的领域中做后续工作时应通过 `list_agents` 找回匹配的子 agent、用 `send_message` 续接，而不是再开一个。工具限制会同时移除其 schema 和这段指引。
 
 #### Token 影响
 

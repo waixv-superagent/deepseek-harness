@@ -423,6 +423,7 @@ export class SubagentContinuationManager {
       mode: 'continuable',
       provider: spec.provider,
       label: spec.label,
+      ...request.specialization !== undefined ? { specialization: request.specialization } : {},
       ...agentProvider !== undefined ? { agentProvider } : {},
       ...agentModel !== undefined ? { agentModel } : {},
       ...request.persona !== undefined ? { persona: request.persona } : {},

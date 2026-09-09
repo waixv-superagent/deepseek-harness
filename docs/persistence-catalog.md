@@ -708,7 +708,7 @@ Source: [`packages/core/session/src/types.ts:254`](../packages/core/session/src/
 'subagent/descriptor': SubagentDescriptorData
 ```
 
-Source: [`packages/subagent/subagent/src/descriptor.ts:37`](../packages/subagent/subagent/src/descriptor.ts)
+Source: [`packages/subagent/subagent/src/descriptor.ts:39`](../packages/subagent/subagent/src/descriptor.ts)
 
 ### `team/*`
 

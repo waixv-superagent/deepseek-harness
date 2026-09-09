@@ -30,7 +30,9 @@ export function apply(ctx: Context): void {
       + 'becomes the subagent\'s next turn: if it is still working, the message waits until its current turn '
       + 'finishes, so it cannot redirect work already underway. This call returns no answer from the '
       + 'subagent — only confirmation that the message was delivered — so use it to give it more work. A '
-      + 'failure means the message was NOT delivered.',
+      + 'failure means the message was NOT delivered. Prefer this over starting a new `subagent` when the '
+      + 'work continues the same line of work as an existing child (match the child via `list_agents`): the '
+      + 'child keeps the context and loaded setup it already built.',
     parameters: {
       subagent_id: {
         type: 'string',

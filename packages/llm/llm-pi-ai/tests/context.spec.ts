@@ -110,6 +110,29 @@ describe('pi-ai request context conversion', () => {
     }])]))).toThrow(/durable attachment service/)
   })
 
+  it('replaces whitespace-only tool output with the sentinel in text-only history', () => {
+    const callId = CallId('call-1')
+    const context = toPiContext(request([
+      history('assistant', [{ type: 'tool-call', id: callId, name: 'lookup', arguments: '{}' }]),
+      user([{
+        type: 'tool-result',
+        toolCallId: callId,
+        content: [{ type: 'text', text: '\n' }, { type: 'text', text: '  \r\n ' }],
+      }]),
+    ]))
+    expect(context.messages).toEqual([
+      expect.objectContaining({ role: 'assistant' }),
+      {
+        role: 'toolResult',
+        toolCallId: 'call-1',
+        toolName: 'lookup',
+        content: [{ type: 'text', text: '(no output)' }],
+        isError: false,
+        timestamp: 0,
+      },
+    ])
+  })
+
   it('resolves user and tool-result images while preserving explicit fallbacks', async () => {
     const callId = CallId('missing-call')
     const knownCallId = CallId('known-call')
@@ -169,6 +192,30 @@ describe('pi-ai request context conversion', () => {
           { type: 'image', data: 'AQ==', mimeType: 'image/png' },
         ],
         isError: true,
+        timestamp: 0,
+      },
+    ])
+  })
+
+  it('trims whitespace-only tool output before the sentinel in the image path', async () => {
+    const callId = CallId('call-1')
+    const context = await toPiContext(request([
+      history('assistant', [{ type: 'tool-call', id: callId, name: 'lookup', arguments: '{}' }]),
+      user([{
+        type: 'tool-result',
+        toolCallId: callId,
+        content: [{ type: 'text', text: '\r\n' }],
+      }]),
+    ]), attachments)
+
+    expect(context.messages).toEqual([
+      expect.objectContaining({ role: 'assistant' }),
+      {
+        role: 'toolResult',
+        toolCallId: 'call-1',
+        toolName: 'lookup',
+        content: [{ type: 'text', text: '(no output)' }],
+        isError: false,
         timestamp: 0,
       },
     ])

@@ -76,6 +76,14 @@ export interface Config {
    * budget belongs to the child runtime or its own deployment.
    */
   maxDepth?: number | 'provider-managed'
+  /**
+   * Optional fixed child-kind annotation (e.g. `character-agent`) persisted
+   * with every child this instance starts and surfaced by `list_agents`.
+   * Deployment-owned, never model-fillable: it is display metadata only, with
+   * no routing, uniqueness, or authorization semantics. Validated at load —
+   * 1–64 lowercase letters, digits, or hyphens, starting with a letter.
+   */
+  specialization?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -96,6 +104,7 @@ export const Config: z<Config> = z.object({
     deny: z.array(z.string()).default(undefined as unknown as string[]),
   }).default(undefined as unknown as { allow: string[]; deny: string[] }),
   maxDepth: z.union([z.natural().max(Number.MAX_SAFE_INTEGER), z.const('provider-managed' as const)]).default(3),
+  specialization: z.string(),
 })
 
 /** Render text blocks from the canonical JSON block array without trusting arbitrary values. */
@@ -273,10 +282,29 @@ function resolveDelegationRun(
   }
 }
 
+/**
+ * Reject a configured specialization that could not serve as a stable
+ * `list_agents` annotation: the tool owns the only caller path, so a
+ * misconfigured value fails at load instead of persisting nonsense on every
+ * child descriptor.
+ * @param value - the configured specialization, when present.
+ * @throws when present but not 1–64 lowercase letters/digits/hyphens starting with a letter.
+ */
+function assertSpecialization(value: string | undefined): void {
+  if (value === undefined) return
+  if (!/^[a-z][a-z0-9-]{0,63}$/.test(value)) {
+    throw new Error(
+      'tool-subagent: `specialization` must be 1–64 lowercase letters, digits, or hyphens, '
+      + 'starting with a letter',
+    )
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   // Direct apply() bypasses Schemastery's numeric constraints. A direct-apply
   // omission stays capless (the schema default only runs through the loader).
   if (config.maxDepth !== 'provider-managed') assertSubagentMaxDepth(config.maxDepth)
+  assertSpecialization(config.specialization)
   // Reject an empty explicit filter at load instead of failing every delegation.
   if (config.toolFilter !== undefined && config.toolFilter.allow === undefined && config.toolFilter.deny === undefined) {
     throw new Error('tool-subagent: `toolFilter` is configured but names neither `allow` nor `deny` — remove the key or fill the filter')
@@ -310,14 +338,18 @@ export function apply(ctx: Context, config: Config): void {
         // a separately installed capability, so this promise holds whenever the
         // continuable background path is reachable at all.
         ? continuable
-          ? ' This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result.'
+          ? ' This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result. Each call starts a NEW child conversation. For follow-up work in a domain you already delegated, reuse the existing child instead of starting another: `list_agents` recalls your continuable children by id and workstream label, and `send_message` resumes the matching child\'s conversation. Start a new child only for an independent line of work — continuing an unrelated conversation wastes its context and repeats its setup.'
           : ' This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.'
         : ' This call waits for the subagent and returns its result.'),
       parameters: {
-        description: {
+        workstream: {
           type: 'string',
           required: true,
-          description: 'A short (3-5 word) description of the delegated task, for display.',
+          description:
+            'A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), '
+            + 'kept as the child\'s durable label in `list_agents`. Name the work, not the action, and keep it '
+            + 'stable across follow-ups: reuse the same name to continue an existing line of work, choose a new '
+            + 'one for unrelated work.',
         },
         prompt: {
           type: 'string',
@@ -384,12 +416,13 @@ export function apply(ctx: Context, config: Config): void {
 
         const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
         const request = {
-          label: args.description,
+          label: args.workstream,
           prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
           parent,
           ...config.agentOptions !== undefined ? { agentOptions: config.agentOptions } : {},
           ...config.persona !== undefined ? { persona: config.persona } : {},
           ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
+          ...config.specialization !== undefined ? { specialization: config.specialization } : {},
           ...maxDepth !== undefined ? { maxDepth } : {},
         }
 
@@ -400,7 +433,7 @@ export function apply(ctx: Context, config: Config): void {
             // there, so this call neither waits for nor collects a result.
             const started = await ctx.subagents.startContinuable({
               provider: config.provider,
-              label: args.description,
+              label: args.workstream,
               request,
               signal: exec.signal,
             })
@@ -414,7 +447,7 @@ export function apply(ctx: Context, config: Config): void {
           // starter can spawn, and the task-owned signal covers startup.
           const id = jobs.start({
             kind: 'subagent',
-            label: args.description,
+            label: args.workstream,
             owner: parent,
             run: () => {
               const controller = new AbortController()
@@ -470,7 +503,7 @@ export function apply(ctx: Context, config: Config): void {
       order: SUBAGENT_SECTION_ORDER,
       text: context => disposeTool === undefined || ctx.tools.get(toolName, context.scope) === undefined
         ? ''
-        : `Use ${toolName} in the background by default. Start independent delegations together in one assistant message and continue useful work while they run. Set \`run_in_background: false\` only when your next action depends on that subagent's result. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message.`,
+        : `Use ${toolName} in the background by default. Start independent delegations together in one assistant message and continue useful work while they run. Set \`run_in_background: false\` only when your next action depends on that subagent's result. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message. Every call starts a new child conversation. For follow-up work in a domain you already delegated, reuse the existing child instead of starting another: \`list_agents\` recalls your continuable children by id and workstream label, and \`send_message\` resumes the matching child's conversation.`,
     })
   }
 }

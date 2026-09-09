@@ -92,7 +92,7 @@ export interface SubagentCapabilities {
 
 /**
  * What a caller asks for when starting a ONE-SHOT subagent. The tool layer
- * builds this from the model's `{ description, prompt }` plus its own config;
+ * builds this from the model's `{ workstream, prompt }` plus its own config;
  * the service validates {@link SubagentCapabilities} against the named provider
  * and resolves the durable descriptor before dispatching to
  * {@link SubagentProvider.start}.
@@ -100,6 +100,13 @@ export interface SubagentCapabilities {
 export interface SubagentStartRequest {
   /** Optional short display label persisted with a session-backed child. */
   readonly label?: string
+  /**
+   * Optional caller-declared specialization (a configured child kind such as
+   * `character-agent`), persisted with the label as a durable identity
+   * annotation. It is caller-owned display metadata, never a capability:
+   * the service performs no routing, uniqueness, or authorization on it.
+   */
+  readonly specialization?: string
   /** Content delivered as the child's user message. */
   readonly prompt: ContentBlock[]
   /**

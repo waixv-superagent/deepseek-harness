@@ -185,7 +185,7 @@
     },
     {
       "name": "list_agents",
-      "description": "List your continuable background subagents by durable id and label. Use it to recall which ones you started, not to poll for completion — you are told when one finishes. Status comes from the live registry: running means the agent is working right now, idle means it is loaded but between turns (it may be waiting on agents it started), and ready means it exists only in storage — resumable, not terminal, and not a result waiting to be collected; a `send_message` starts a new turn on the same conversation, and a direct child remains a `send_message` candidate in every status. The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail. Children that could not be read are reported as diagnostics instead of being silently dropped. Scope `descendants` walks the whole tree below you in stable pre-order, annotating each entry with its durable direct-parent session id and depth. You may use `send_message` only for depth-1 entries; deeper entries are candidates for `interrupt_agent` only.",
+      "description": "List your continuable background subagents by durable id and workstream label. Use it to recall which ones you started — especially before delegating follow-up work, so you can resume a matching child with `send_message` instead of starting a new one — not to poll for completion: you are told when one finishes. The workstream is the child's durable line-of-work label; the optional specialization marks the child kind a deployment declared (e.g. `character-agent`), never a permission. Status comes from the live registry: running means the agent is working right now, idle means it is loaded but between turns (it may be waiting on agents it started), and ready means it exists only in storage — resumable, not terminal, and not a result waiting to be collected; a `send_message` starts a new turn on the same conversation, and a direct child remains a `send_message` candidate in every status. The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail. Children that could not be read are reported as diagnostics instead of being silently dropped. Scope `descendants` walks the whole tree below you in stable pre-order, annotating each entry with its durable direct-parent session id and depth. You may use `send_message` only for depth-1 entries; deeper entries are candidates for `interrupt_agent` only.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -246,7 +246,7 @@
     },
     {
       "name": "send_message",
-      "description": "Send a message to a background subagent by its subagent id, continuing the same conversation. It becomes the subagent's next turn: if it is still working, the message waits until its current turn finishes, so it cannot redirect work already underway. This call returns no answer from the subagent — only confirmation that the message was delivered — so use it to give it more work. A failure means the message was NOT delivered.",
+      "description": "Send a message to a background subagent by its subagent id, continuing the same conversation. It becomes the subagent's next turn: if it is still working, the message waits until its current turn finishes, so it cannot redirect work already underway. This call returns no answer from the subagent — only confirmation that the message was delivered — so use it to give it more work. A failure means the message was NOT delivered. Prefer this over starting a new `subagent` when the work continues the same line of work as an existing child (match the child via `list_agents`): the child keeps the context and loaded setup it already built.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -283,13 +283,13 @@
     },
     {
       "name": "subagent",
-      "description": "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation. This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result.",
+      "description": "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation. This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation. Set `run_in_background: false` only when your next action depends on receiving the result. Each call starts a NEW child conversation. For follow-up work in a domain you already delegated, reuse the existing child instead of starting another: `list_agents` recalls your continuable children by id and workstream label, and `send_message` resumes the matching child's conversation. Start a new child only for an independent line of work — continuing an unrelated conversation wastes its context and repeats its setup.",
       "parameters": {
         "type": "object",
         "properties": {
-          "description": {
+          "workstream": {
             "type": "string",
-            "description": "A short (3-5 word) description of the delegated task, for display."
+            "description": "A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work."
           },
           "prompt": {
             "type": "string",
@@ -301,7 +301,7 @@
           }
         },
         "required": [
-          "description",
+          "workstream",
           "prompt"
         ]
       }
@@ -312,9 +312,9 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "description": {
+          "workstream": {
             "type": "string",
-            "description": "A short (3-5 word) description of the delegated task, for display."
+            "description": "A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work."
           },
           "prompt": {
             "type": "string",
@@ -326,7 +326,7 @@
           }
         },
         "required": [
-          "description",
+          "workstream",
           "prompt"
         ]
       }
@@ -337,9 +337,9 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "description": {
+          "workstream": {
             "type": "string",
-            "description": "A short (3-5 word) description of the delegated task, for display."
+            "description": "A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work."
           },
           "prompt": {
             "type": "string",
@@ -351,7 +351,7 @@
           }
         },
         "required": [
-          "description",
+          "workstream",
           "prompt"
         ]
       }
@@ -362,9 +362,9 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "description": {
+          "workstream": {
             "type": "string",
-            "description": "A short (3-5 word) description of the delegated task, for display."
+            "description": "A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work."
           },
           "prompt": {
             "type": "string",
@@ -372,7 +372,7 @@
           }
         },
         "required": [
-          "description",
+          "workstream",
           "prompt"
         ]
       }

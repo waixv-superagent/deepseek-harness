@@ -127,6 +127,21 @@ describe('SubagentRuntime', () => {
     expect('resume' in provider).toBe(false)
   })
 
+  it('records a caller-declared specialization in the one-shot descriptor', async () => {
+    const { subagents } = await service()
+    const provider = new StubProvider('one-shot')
+    subagents.registerProvider(provider)
+    await subagents.start('one-shot', { ...baseRequest(), label: 'audit work', specialization: 'character-agent' })
+
+    expect(provider.lastRequest?.descriptor).toEqual({
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'one-shot',
+      provider: 'one-shot',
+      label: 'audit work',
+      specialization: 'character-agent',
+    })
+  })
+
   it('does not expose manager teardown and treats public drains as no-ops when no manager was bound', async () => {
     const { subagents } = await service()
     // Without `ctx.agents` no manager exists, so nothing was ever materialized.

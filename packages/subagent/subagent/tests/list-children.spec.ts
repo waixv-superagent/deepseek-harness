@@ -180,6 +180,28 @@ describe('SubagentRuntime.listChildren', () => {
     ])
   })
 
+  it('serves the durable specialization annotation on the child entry', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SubagentRuntime)
+    const parentId = SessionId('specialized-parent')
+    ctx.sessions.create(parentId)
+    const childId = SessionId('specialized-child')
+    const child = ctx.sessions.create(childId, {
+      meta: { parentSession: parentId, origin: 'subagent' },
+    })
+    child.append('turn/start', { turn: 1 })
+    child.append('subagent/descriptor', { ...descriptorPayload('dsm work'), specialization: 'character-agent' })
+
+    await expect(ctx.subagents.listChildren(parentId)).resolves.toEqual([
+      {
+        kind: 'child', id: childId, label: 'dsm work', mode: 'continuable',
+        activity: 'running', hasChildren: false, specialization: 'character-agent',
+      },
+    ])
+  })
+
   it('fails loud when the projection registry is not mounted, even with no children', async () => {
     const { ctx, parent } = await setup([], { sessionProjections: false })
     await expect(ctx.subagents.listChildren(parent.id)).rejects.toThrow(

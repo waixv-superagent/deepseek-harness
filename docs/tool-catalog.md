@@ -1509,9 +1509,9 @@ Delegate a self-contained task to a subagent (a separate agent that works in its
 {
   "type": "object",
   "properties": {
-    "description": {
+    "workstream": {
       "type": "string",
-      "description": "A short (3-5 word) description of the delegated task, for display."
+      "description": "A short stable name for the line of work this child will own (e.g. `dsm-import-path-ui`), kept as the child's durable label in `list_agents`. Name the work, not the action, and keep it stable across follow-ups: reuse the same name to continue an existing line of work, choose a new one for unrelated work."
     },
     "prompt": {
       "type": "string",
@@ -1523,7 +1523,7 @@ Delegate a self-contained task to a subagent (a separate agent that works in its
     }
   },
   "required": [
-    "description",
+    "workstream",
     "prompt"
   ]
 }
@@ -1560,7 +1560,7 @@ Source: [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/sub
 
 ### `list_agents`
 
-List your continuable background subagents by durable id and label. Use it to recall which ones you started, not to poll for completion — you are told when one finishes. Status comes from the live registry: running means the agent is working right now, idle means it is loaded but between turns (it may be waiting on agents it started), and ready means it exists only in storage — resumable, not terminal, and not a result waiting to be collected; a `send_message` starts a new turn on the same conversation, and a direct child remains a `send_message` candidate in every status. The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail. Children that could not be read are reported as diagnostics instead of being silently dropped. Scope `descendants` walks the whole tree below you in stable pre-order, annotating each entry with its durable direct-parent session id and depth. You may use `send_message` only for depth-1 entries; deeper entries are candidates for `interrupt_agent` only.
+List your continuable background subagents by durable id and workstream label. Use it to recall which ones you started — especially before delegating follow-up work, so you can resume a matching child with `send_message` instead of starting a new one — not to poll for completion: you are told when one finishes. The workstream is the child's durable line-of-work label; the optional specialization marks the child kind a deployment declared (e.g. `character-agent`), never a permission. Status comes from the live registry: running means the agent is working right now, idle means it is loaded but between turns (it may be waiting on agents it started), and ready means it exists only in storage — resumable, not terminal, and not a result waiting to be collected; a `send_message` starts a new turn on the same conversation, and a direct child remains a `send_message` candidate in every status. The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail. Children that could not be read are reported as diagnostics instead of being silently dropped. Scope `descendants` walks the whole tree below you in stable pre-order, annotating each entry with its durable direct-parent session id and depth. You may use `send_message` only for depth-1 entries; deeper entries are candidates for `interrupt_agent` only.
 
 ```json
 {
@@ -1582,7 +1582,7 @@ Source: [`packages/subagent/tool-subagent-control/src/list-agents.ts`](../packag
 
 ### `send_message`
 
-Send a message to a background subagent by its subagent id, continuing the same conversation. It becomes the subagent's next turn: if it is still working, the message waits until its current turn finishes, so it cannot redirect work already underway. This call returns no answer from the subagent — only confirmation that the message was delivered — so use it to give it more work. A failure means the message was NOT delivered.
+Send a message to a background subagent by its subagent id, continuing the same conversation. It becomes the subagent's next turn: if it is still working, the message waits until its current turn finishes, so it cannot redirect work already underway. This call returns no answer from the subagent — only confirmation that the message was delivered — so use it to give it more work. A failure means the message was NOT delivered. Prefer this over starting a new `subagent` when the work continues the same line of work as an existing child (match the child via `list_agents`): the child keeps the context and loaded setup it already built.
 
 ```json
 {

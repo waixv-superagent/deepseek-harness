@@ -259,11 +259,14 @@ export function serializeMessages(messages: Message[]): WireMessage[] {
       wire.push({ role: 'user', content: text })
     }
     for (const result of toolResults) {
+      const content = flattenText(result.content)
       wire.push({
         role: 'tool',
         tool_call_id: result.toolCallId,
-        // Empty tool output still needs SOME content on the wire.
-        content: flattenText(result.content) || '(no output)',
+        // Empty or whitespace-only tool output still needs SOME content on the
+        // wire: strict gateways reject whitespace-only tool messages. Keep
+        // non-blank text intact and only fall back when blank.
+        content: content.trim().length === 0 ? '(no output)' : content,
       })
     }
   }
@@ -326,7 +329,8 @@ export async function serializeMessagesWithImages(
       wire.push({
         role: 'tool',
         tool_call_id: result.toolCallId,
-        content: text || '(no output)',
+        // Whitespace-only text would replay verbatim as an empty wire message.
+        content: text.trim().length === 0 ? '(no output)' : text,
       })
       pendingToolImages.push(...imageParts)
     }

@@ -176,6 +176,20 @@ describe('serializeMessages', () => {
     expect(wire).toEqual([{ role: 'tool', tool_call_id: 'call-1', content: '(no output)' }])
   })
 
+  it('sends a sentinel for whitespace-only tool-result content', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-1'),
+          content: [{ type: 'text', text: '\n' }, { type: 'text', text: '  \r\n ' }],
+        }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+    ])
+    expect(wire).toEqual([{ role: 'tool', tool_call_id: 'call-1', content: '(no output)' }])
+  })
+
   it('splits mixed user text + tool results into separate wire messages', () => {
     const wire = serializeMessages([
       createUserMessage({
@@ -514,6 +528,19 @@ describe('image serialization', () => {
     await expect(serializeMessagesWithImages(messages, imageOptions([], fileResolver()))).resolves.toEqual([
       { role: 'tool', tool_call_id: 'nested', content: 'inside' },
       { role: 'tool', tool_call_id: 'empty', content: '(no output)' },
+    ])
+  })
+
+  it('applies the sentinel to whitespace-only tool text in the image path', async () => {
+    const messages = [createUserMessage({
+      content: [
+        { type: 'tool-result', toolCallId: CallId('ws'), content: [{ type: 'text', text: ' \n ' }] },
+      ],
+      source: { kind: 'plugin', plugin: 'test' },
+    })]
+
+    await expect(serializeMessagesWithImages(messages, imageOptions([], fileResolver()))).resolves.toEqual([
+      { role: 'tool', tool_call_id: 'ws', content: '(no output)' },
     ])
   })
 

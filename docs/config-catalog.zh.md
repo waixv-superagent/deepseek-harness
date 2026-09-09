@@ -2842,6 +2842,14 @@ export interface Config {
    * budget belongs to the child runtime or its own deployment.
    */
   maxDepth?: number | 'provider-managed'
+  /**
+   * Optional fixed child-kind annotation (e.g. `character-agent`) persisted
+   * with every child this instance starts and surfaced by `list_agents`.
+   * Deployment-owned, never model-fillable: it is display metadata only, with
+   * no routing, uniqueness, or authorization semantics. Validated at load —
+   * 1–64 lowercase letters, digits, or hyphens, starting with a letter.
+   */
+  specialization?: string
 }
 ```
 

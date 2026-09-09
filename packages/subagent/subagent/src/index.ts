@@ -328,13 +328,13 @@ export class SubagentRuntime extends Service {
    * Enumerate the parent's direct session-backed subagents without loading or
    * resuming an Agent and without any query service: the listing merges the live
    * session store with optional session persistence (live-preferred) and
-   * serves each child's durable mode/label from the registered `subagent`
-   * projection unit down a three-rung ladder — the registry's watermark
-   * snapshot for a live child; for a cold one, a durable projection-cache
-   * row when the optional cache serves an own-suffix identity (its `seq`
-   * gate proves the value postdates the fork seed, where a child's own
-   * descriptor is immutable once appended), else one persistence inspection
-   * folded through the registry. The
+   * serves each child's durable mode/label/specialization from the registered
+   * `subagent` projection unit down a three-rung ladder — the registry's
+   * watermark snapshot for a live child; for a cold one, a durable
+   * projection-cache row when the optional cache serves an own-suffix
+   * identity (its `seq` gate proves the value postdates the fork seed, where
+   * a child's own descriptor is immutable once appended), else one
+   * persistence inspection folded through the registry. The
    * projection fold is the single classification authority; per-child
    * diagnostics relay a fold that served no identity or a failed inspection,
    * never a list-time descriptor parse. Absent persistence, enumeration is
@@ -436,6 +436,7 @@ export class SubagentRuntime extends Service {
       mode: 'one-shot',
       provider: name,
       ...request.label !== undefined ? { label: request.label } : {},
+      ...request.specialization !== undefined ? { specialization: request.specialization } : {},
     })
     const resolved: ResolvedSubagentStartRequest = { ...request, descriptor }
     return observeRun(this.emitLifecycle, name, request.parent, await provider.start(resolved))

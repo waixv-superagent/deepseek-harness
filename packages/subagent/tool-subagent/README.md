@@ -26,6 +26,7 @@ A foreground call passes the execution signal through startup and execution, awa
 | `persona` | Per-child persona; requires provider `persona` capability. |
 | `toolFilter` | Per-child global-tool restriction; requires `toolFilter` capability. |
 | `maxDepth` | Absolute delegation-depth cap, default `3` (`0` forbids delegation); a numeric cap requires the `depthLimit` capability and fails the mount without it. `'provider-managed'` sends no cap for an out-of-process provider whose budget belongs to the child harness. The tool stays visible at the cap; each attempted start checks the calling agent's current depth and returns an errored tool result when rejected. |
+| `specialization` | Fixed child-kind annotation (e.g. `character-agent`), persisted with every child this instance starts and surfaced by `list_agents`. Deployment-owned display metadata with no routing, uniqueness, or authorization semantics; validated at load as 1–64 lowercase letters, digits, or hyphens starting with a letter. |
 
 ## Concurrency
 
@@ -37,7 +38,7 @@ Foreground and background calls are concurrency-safe: sibling delegations in one
 
 #### What the model sees
 
-The generated default [`subagent` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent) under this instance's configured name while its provider exists. Provider context inheritance changes the tool and prompt descriptions. Enabled background mode adds `run_in_background`: continuable mode documents its `true` default, runtime settlement notice, and explicit foreground override, while one-shot mode documents its `false` default and the job id collected with `job_output` or stopped with `job_kill`. While the tool is visible in an assembly's scope, a `tool:<toolName>` system-prompt section tells the model to start independent continuable delegations together, keep working while they run, and choose foreground only when its next action depends on the result; a tool restriction removes both its schema and this guidance.
+The generated default [`subagent` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent) under this instance's configured name while its provider exists. The model names every delegation with the required `workstream` parameter — a stable line-of-work label kept as the child's durable identity in `list_agents` — instead of a free-form action description. Provider context inheritance changes the tool and prompt descriptions. Enabled background mode adds `run_in_background`: continuable mode documents its `true` default, runtime settlement notice, and explicit foreground override, while one-shot mode documents its `false` default and the job id collected with `job_output` or stopped with `job_kill`. While the tool is visible in an assembly's scope, a `tool:<toolName>` system-prompt section tells the model to start independent continuable delegations together, keep working while they run, and choose foreground only when its next action depends on the result; it also tells the model that every call starts a new child conversation, so follow-up work in an already-delegated domain should resume the matching child with `send_message` (recalled via `list_agents`) rather than start another. A tool restriction removes both its schema and this guidance.
 
 #### Token effect
 

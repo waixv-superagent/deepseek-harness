@@ -119,11 +119,13 @@ const identityValueSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('one-shot'),
     label: z.string().optional(),
+    specialization: z.string().optional(),
     seq: z.number().int().nonnegative(),
   }).strict(),
   z.object({
     mode: z.literal('continuable'),
     label: z.string(),
+    specialization: z.string().optional(),
     seq: z.number().int().nonnegative(),
   }).strict(),
 ]) as unknown as z.ZodType<SubagentIdentityProjection>
@@ -149,9 +151,15 @@ function descriptorIdentity(event: SessionEvent): SubagentIdentityProjection | u
     ? {
       mode: 'one-shot',
       ...descriptor.label !== undefined ? { label: descriptor.label } : {},
+      ...descriptor.specialization !== undefined ? { specialization: descriptor.specialization } : {},
       seq: event.seq,
     }
-    : { mode: 'continuable', label: descriptor.label, seq: event.seq }
+    : {
+      mode: 'continuable',
+      label: descriptor.label,
+      ...descriptor.specialization !== undefined ? { specialization: descriptor.specialization } : {},
+      seq: event.seq,
+    }
 }
 
 /**
@@ -175,7 +183,8 @@ export const subagentIdentityProjectionDefinition = {
     return identity === undefined ? {} : { identity }
   },
   wire: { viewSchema: identitySchema, view: state => state.identity ?? null },
-  // Bumped when the identity gained its `seq` field: an older checkpoint row
-  // would replay into a value the schema rejects, so it must refold instead.
-  stateVersion: 2,
+  // Bumped when the identity gained its `specialization` field: an older
+  // checkpoint row would replay into a value the schema rejects, so it must
+  // refold instead.
+  stateVersion: 3,
 } satisfies ProjectionDefinition<'subagent', IdentityState>

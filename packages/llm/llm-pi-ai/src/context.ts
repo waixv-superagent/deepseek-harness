@@ -154,13 +154,17 @@ function textOnlyContext(options: GenerateOptions, onReplayDegrade?: (reason: st
     const results = message.content.filter(block => block.type === 'tool-result')
     if (text.length > 0 || results.length === 0) messages.push({ role: 'user', content: text, timestamp: 0 })
     for (const result of results) {
+      const text = toolResultText(result.content)
       messages.push({
         role: 'toolResult',
         toolCallId: result.toolCallId,
         toolName: toolNames.get(result.toolCallId) ?? 'unknown',
         content: [{
           type: 'text',
-          text: toolResultText(result.content) || '(no output)',
+          // Empty or whitespace-only tool output still needs SOME content on
+          // the wire: pi-ai converts the text block verbatim and strict
+          // OpenAI-compatible gateways reject whitespace-only tool messages.
+          text: text.trim().length === 0 ? '(no output)' : text,
         }],
         isError: result.isError ?? false,
         timestamp: 0,
@@ -274,7 +278,12 @@ async function toPiContextWithImages(
         toolCallId: result.toolCallId,
         toolName: toolNames.get(result.toolCallId) ?? 'unknown',
         content: typeof resultContent === 'string'
-          ? [{ type: 'text', text: resultContent || '(no output)' }]
+          // Whitespace-only output would replay verbatim as an empty wire tool
+          // message; keep non-blank text intact and only fall back when blank.
+          ? [{
+            type: 'text',
+            text: resultContent.trim().length === 0 ? '(no output)' : resultContent,
+          }]
           : resultContent,
         isError: result.isError ?? false,
         timestamp: 0,
