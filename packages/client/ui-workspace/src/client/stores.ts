@@ -8,13 +8,18 @@
 import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-store'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import { reconcileManualOrder, type ArchivedFilter, type SessionRowState } from './tree.ts'
+import { reconcileManualOrder, type ArchivedFilter, type SessionRowState, SOURCE_GROUP_PREFIX } from './tree.ts'
 
 /** Browser-local order account for the hierarchy-free flat Session list. */
 export const FLAT_SESSION_ORDER_KEY = '__flat_session_order__'
 
-/** Session-list grouping mode: sibling Workspace sections, a Workspace tree, or one flat list. */
-export type SessionGroupBy = 'workspace' | 'workspace-tree' | 'flat'
+/**
+ * Session-list grouping mode: sibling Workspace sections, a Workspace tree,
+ * creation-source sections over the same Workspace sections, or one flat list.
+ * The source dimension leaves the default alone: it is a choice the operator
+ * makes, and the saved mode is what every later mount reads back.
+ */
+export type SessionGroupBy = 'workspace' | 'workspace-tree' | 'source' | 'flat'
 /** Session order: saved manual positions or current recency. */
 export type SessionOrderBy = 'manual' | 'updated'
 
@@ -99,8 +104,12 @@ export function createWorkspaceViewStore(): EngineStoreHandle<WorkspaceViewState
       setGroupExpanded: (d, key: string, expanded: boolean) => { d.groupExpansion[key] = expanded },
       retainAccountKeys: (d, workspaceKeys: readonly string[]) => {
         const retained = new Set(workspaceKeys)
+        // A source section is not an account: it exists only while the list is
+        // grouped by source, so its remembered expansion survives the account
+        // sweep that prunes departed Workspaces and their saved orders.
         d.groupExpansion = Object.fromEntries(
-          Object.entries(d.groupExpansion).filter(([key]) => retained.has(key)),
+          Object.entries(d.groupExpansion).filter(([key]) =>
+            retained.has(key) || key.startsWith(SOURCE_GROUP_PREFIX)),
         )
         d.sessionOrderByAccount = Object.fromEntries(
           Object.entries(d.sessionOrderByAccount).filter(([key]) => retained.has(key)),

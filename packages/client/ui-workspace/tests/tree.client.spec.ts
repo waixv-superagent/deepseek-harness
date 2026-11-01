@@ -9,7 +9,8 @@ import type { SessionProjectionSnapshot } from '@deepseek-ai/dsh-api-session-con
 import {
   type ArchivedFilter,
   deriveFlat, deriveGroups, deriveSearchResults, orderByRecency, owningGroupKey, owningParentFolder,
-  pinCurrentBlank, reconcileManualOrder, sessionMemberIds, visibleSessionIds, workspaceLabel, UNGROUPED_KEY,
+  pinCurrentBlank, reconcileManualOrder, sessionGroupKey, sessionMemberIds, sessionSource, sourceGroupKey,
+  visibleSessionIds, workspaceLabel, SOURCE_GROUP_PREFIX, UNGROUPED_KEY,
 } from '../src/client/tree.ts'
 import { createWorkspaceViewStore } from '../src/client/stores.ts'
 
@@ -70,6 +71,115 @@ describe('owningGroupKey', () => {
     const workspaces = [workspace('first', ['owned'])]
     expect(owningGroupKey(workspaces, sid('owned'))).toBe('first')
     expect(owningGroupKey(workspaces, sid('loose'))).toBe(UNGROUPED_KEY)
+  })
+})
+
+/** One Session that records the Agent preset it was created with. */
+const sourced = (id: string, updatedAt: number, agentPreset: string): SessionSummary => ({
+  ...summary(id, updatedAt), projectionValues: { agentPreset },
+})
+
+describe('Session creation source', () => {
+  it('reads the agentPreset projection and rejects blank or missing labels', () => {
+    expect(sessionSource(sourced('worker', 1, 'dsh-superagent-worker'))).toBe('dsh-superagent-worker')
+    expect(sessionSource(sourced('blank-label', 1, '   '))).toBeUndefined()
+    expect(sessionSource(summary('plain', 1))).toBeUndefined()
+    expect(sessionSource(undefined)).toBeUndefined()
+  })
+
+  it('keeps source keys in their own namespace', () => {
+    expect(sourceGroupKey('dsh-superagent-worker')).toBe(`${SOURCE_GROUP_PREFIX}dsh-superagent-worker`)
+    expect(sourceGroupKey('dsh-superagent-worker')).not.toBe(UNGROUPED_KEY)
+  })
+
+  it('resolves the group key of a Session in either dimension', () => {
+    const sessions = list(
+      sourced('worker', 5, 'dsh-superagent-worker'),
+      summary('mine', 5),
+    )
+    const workspaces = [workspace('repo', ['worker', 'mine'])]
+    expect(sessionGroupKey(sessions, workspaces, sid('worker'), 'workspace')).toBe('repo')
+    expect(sessionGroupKey(sessions, workspaces, sid('worker'), 'source'))
+      .toBe(sourceGroupKey('dsh-superagent-worker'))
+    // A Session without a source stays under its Workspace in both dimensions.
+    expect(sessionGroupKey(sessions, workspaces, sid('mine'), 'source')).toBe('repo')
+  })
+
+  it('hoists sourced Sessions out of their Workspaces into collapsed sections', () => {
+    const sessions = list(
+      sourced('worker-a', 30, 'dsh-superagent-worker'),
+      sourced('worker-b', 20, 'dsh-superagent-worker'),
+      summary('mine', 10),
+    )
+    // The workers share the person's Workspace; another Workspace holds only one of them.
+    const workspaces = [
+      workspace('repo', ['worker-a', 'mine']),
+      workspace('work-1', ['worker-b']),
+    ]
+    const groups = deriveGroups(sessions, workspaces, noRows, noAttention, {
+      expandedGroups: ['repo'],
+      mode: 'source',
+    })
+    expect(groups.map(group => group.key))
+      .toEqual([sourceGroupKey('dsh-superagent-worker'), 'repo'])
+    const [source, repo] = groups
+    expect(source!.sourceId).toBe('dsh-superagent-worker')
+    expect(source!.workspaceId).toBeUndefined()
+    expect(source!.cwd).toBeUndefined()
+    // Folded by default: the section states its size but renders no rows.
+    expect(source!.expanded).toBe(false)
+    expect(source!.sessionCount).toBe(2)
+    expect(source!.sessions).toEqual([])
+    // The person's Workspace keeps only their own Session; the worker-only
+    // Workspace contributes no empty heading.
+    expect(repo!.sessions.map(row => row.id)).toEqual([sid('mine')])
+  })
+
+  it('renders sourced rows in recency order once the section is opened', () => {
+    const sessions = list(
+      sourced('older', 10, 'dsh-superagent-worker'),
+      sourced('newer', 40, 'dsh-superagent-worker'),
+      sourced('feature', 20, 'dsh-superagent-feature'),
+    )
+    const groups = deriveGroups(sessions, [], noRows, noAttention, {
+      expandedGroups: [
+        sourceGroupKey('dsh-superagent-worker'),
+        sourceGroupKey('dsh-superagent-feature'),
+      ],
+      mode: 'source',
+    })
+    expect(groups.map(group => group.key)).toEqual([
+      sourceGroupKey('dsh-superagent-feature'),
+      sourceGroupKey('dsh-superagent-worker'),
+    ])
+    expect(groups[0]!.sessions.map(row => row.id)).toEqual([sid('feature')])
+    expect(groups[1]!.sessions.map(row => row.id)).toEqual([sid('newer'), sid('older')])
+  })
+
+  it('leaves every Workspace section untouched when no Session reports a source', () => {
+    const sessions = list(summary('mine', 10), summary('loose', 20))
+    const workspaces = [workspace('repo', ['mine'])]
+    const groups = deriveGroups(sessions, workspaces, noRows, noAttention, {
+      expandedGroups: ['repo', UNGROUPED_KEY],
+      mode: 'source',
+    })
+    expect(groups.map(group => group.key)).toEqual(['repo', UNGROUPED_KEY])
+    expect(groups.every(group => group.sourceId === undefined)).toBe(true)
+    expect(groups[0]!.sessions.map(row => row.id)).toEqual([sid('mine')])
+    expect(groups[1]!.sessions.map(row => row.id)).toEqual([sid('loose')])
+  })
+
+  it('keeps the source group containing the open Session marked as current', () => {
+    const sessions = withMain(list(
+      sourced('worker', 30, 'dsh-superagent-worker'),
+      summary('mine', 10),
+    ), sid('worker'))
+    const groups = deriveGroups(sessions, [workspace('repo', ['worker', 'mine'])], noRows, noAttention, {
+      expandedGroups: [],
+      mode: 'source',
+    })
+    expect(groups.map(group => [group.key, group.containsCurrent]))
+      .toEqual([[sourceGroupKey('dsh-superagent-worker'), true], ['repo', false]])
   })
 })
 

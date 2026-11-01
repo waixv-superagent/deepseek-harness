@@ -13,9 +13,38 @@ import type {
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
+// Type-only: pulls the `agentPreset` Session projection value into this program.
+import type {} from '@deepseek-ai/dsh-agent-preset-registry/types'
 
 /** Group key for Sessions outside every Workspace. */
 export const UNGROUPED_KEY = ''
+
+/** Prefix of a creation-source group key, so the two key spaces cannot collide. */
+export const SOURCE_GROUP_PREFIX = 'source:'
+
+/**
+ * Group key for one creation-source section.
+ * @param source - source label (`agentPreset` id) shared by its members.
+ * @returns the group key.
+ */
+export function sourceGroupKey(source: string): string {
+  return `${SOURCE_GROUP_PREFIX}${source}`
+}
+
+/**
+ * The creation source one Session reports: the Agent preset it was created
+ * with, which a deployment composing per-session presets records durably and
+ * publishes through the `agentPreset` projection. Sessions a person starts
+ * with the deployment default are not distinguished and report nothing.
+ * @param session - listed Session summary, when one exists.
+ * @returns the source label, or undefined when the Session records none.
+ */
+export function sessionSource(session: SessionSummary | undefined): string | undefined {
+  const value = session?.projectionValues?.agentPreset
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
+}
 
 /**
  * Resolve the Workspace browser group that owns one Session.
@@ -29,6 +58,30 @@ export function owningGroupKey(
 ): string {
   return (workspaces.find(workspace => workspace.sessionIds.includes(sessionId))
     ?.workspaceId as string | undefined) ?? UNGROUPED_KEY
+}
+
+/** Grouping dimension the browser renders. */
+export type SessionGroupMode = 'workspace' | 'source'
+
+/**
+ * Resolve the group one Session renders under in the selected dimension.
+ * @param list - sessions list snapshot holding the Session's summaries.
+ * @param workspaces - authoritative Workspace membership.
+ * @param sessionId - Session whose group is required.
+ * @param mode - grouping dimension; source mode only moves Sessions that report a source.
+ * @returns the group key the Session appears under.
+ */
+export function sessionGroupKey(
+  list: SessionListState,
+  workspaces: readonly WorkspaceView[],
+  sessionId: SessionId,
+  mode: SessionGroupMode = 'workspace',
+): string {
+  if (mode === 'source') {
+    const source = sessionSource(list.byId[sessionId])
+    if (source !== undefined) return sourceGroupKey(source)
+  }
+  return owningGroupKey(workspaces, sessionId)
 }
 
 /** Pending interaction kinds with dedicated Workspace-row presentation. */
@@ -66,12 +119,18 @@ export type SessionOrderBy = 'manual' | 'updated'
 
 /** One workspace group section: header row facts + visible top-level session rows. */
 export interface GroupNode {
-  /** Group key: the workspace id or {@link UNGROUPED_KEY}. */
+  /** Group key: the workspace id, a `source:` key, or {@link UNGROUPED_KEY}. */
   key: string
-  /** Backing Workspace id; absent only for the ungrouped bucket. */
+  /** Backing Workspace id; absent for the ungrouped bucket and for source sections. */
   workspaceId: WorkspaceId | undefined
+  /**
+   * Creation source this section groups (an `agentPreset` id); absent unless
+   * the browser groups by source. A source section has no directory, so the
+   * renderer shows no create affordance and no Workspace actions.
+   */
+  sourceId?: string
   cwd: string | undefined
-  /** Workspace creation time (epoch ms); absent only for the ungrouped bucket. */
+  /** Workspace creation time (epoch ms); absent for the ungrouped bucket and source sections. */
   createdAt: number | undefined
   label: string
   /** Total visible sessions in the group. */
@@ -111,11 +170,18 @@ export interface TreeView {
   expandedGroups: readonly string[]
   /** Browser-local order for Sessions without a backing Workspace account. */
   ungroupedOrder?: readonly string[]
+  /**
+   * Grouping dimension. `workspace` (the default) sections Sessions by their
+   * Workspace; `source` hoists every Session that reports a creation source
+   * into its own section and leaves the rest under their Workspaces.
+   */
+  mode?: SessionGroupMode
 }
 
 interface Group {
   key: string
   workspaceId: WorkspaceId | undefined
+  sourceId: string | undefined
   cwd: string | undefined
   createdAt: number | undefined
   label: string
@@ -304,8 +370,9 @@ function buildGroup(
   createdAt: number | undefined,
   label: string,
   members: readonly SessionSummary[],
+  sourceId?: string,
 ): Group {
-  return { key, workspaceId, cwd, createdAt, label, sessions: [...members] }
+  return { key, workspaceId, sourceId, cwd, createdAt, label, sessions: [...members] }
 }
 
 /** Apply a stored Ungrouped order and append newly loose Sessions by recency. */
@@ -330,6 +397,18 @@ function orderedUngrouped(
  * members resolved from caller-ordered sessionIds. Sessions outside every
  * Workspace trail in the browser-local Ungrouped order, which falls back to
  * recency before that order is initialized.
+ * @param list - sessions list snapshot.
+ * @param workspaces - real Workspaces in Host group order.
+ * @param archived - registry-global archive set.
+ * @param archivedFilter - archived-row visibility choice.
+ * @param ungroupedOrder - browser-local order for the Ungrouped bucket.
+ * @param include - membership test for the Sessions this dimension owns; a
+ *   Workspace member it rejects is not this dimension's member either, so it
+ *   never lands in the Ungrouped bucket.
+ * @param dropEmpty - hide a Workspace section that has no visible member (the
+ *   source dimension hoists its members away, so their Workspaces would
+ *   otherwise render as empty headings).
+ * @returns group sections in render order.
  */
 function groupByWorkspace(
   list: SessionListState,
@@ -337,6 +416,8 @@ function groupByWorkspace(
   archived: ReadonlySet<SessionId>,
   archivedFilter: ArchivedFilter,
   ungroupedOrder: readonly string[] | undefined,
+  include: (summary: SessionSummary) => boolean = () => true,
+  dropEmpty = false,
 ): Group[] {
   const current = mainSessionId(list)
   const groups: Group[] = []
@@ -347,12 +428,14 @@ function groupByWorkspace(
       const summary = list.byId[id]
       if (summary === undefined) continue // account may lead the list pull; the row appears when the summary lands
       accounted.add(id)
+      if (!include(summary)) continue
       if (!sessionVisible(summary, current, archived, archivedFilter)) continue
       members.push(summary)
     }
     // The archived-only view lists archives, not the Workspace inventory, so
-    // a Workspace without archived Sessions contributes no group.
-    if (archivedFilter === 'only' && members.length === 0) continue
+    // a Workspace without archived Sessions contributes no group. A dimension
+    // that hoisted every member away leaves no heading to show either.
+    if (members.length === 0 && (archivedFilter === 'only' || dropEmpty)) continue
     groups.push(buildGroup(
       workspace.workspaceId, workspace.workspaceId, workspace.path,
       Date.parse(workspace.createdAt), workspace.title, members,
@@ -361,7 +444,8 @@ function groupByWorkspace(
   const stray = list.ids
     .map(id => list.byId[id])
     .filter((s): s is SessionSummary =>
-      s !== undefined && !accounted.has(s.id) && sessionVisible(s, current, archived, archivedFilter))
+      s !== undefined && !accounted.has(s.id) && include(s)
+      && sessionVisible(s, current, archived, archivedFilter))
   if (stray.length > 0) {
     groups.push(buildGroup(
       UNGROUPED_KEY,
@@ -372,6 +456,59 @@ function groupByWorkspace(
       orderedUngrouped(stray, ungroupedOrder, list.byId),
     ))
   }
+  return groups
+}
+
+/**
+ * Group Sessions by creation source, leaving Sessions that report no source in
+ * their Workspace sections. Source sections hold their members in recency order
+ * (a source is not a reorderable account) and come first, so the Agent-created
+ * rows are one collapsed heading each instead of a Workspace apiece.
+ * @param list - sessions list snapshot.
+ * @param workspaces - real Workspaces in Host group order.
+ * @param archived - registry-global archive set.
+ * @param archivedFilter - archived-row visibility choice.
+ * @param ungroupedOrder - browser-local order for the Ungrouped bucket.
+ * @returns source sections followed by the Workspace sections of unsourced Sessions.
+ */
+function groupBySource(
+  list: SessionListState,
+  workspaces: readonly WorkspaceView[],
+  archived: ReadonlySet<SessionId>,
+  archivedFilter: ArchivedFilter,
+  ungroupedOrder: readonly string[] | undefined,
+): Group[] {
+  const current = mainSessionId(list)
+  const buckets = new Map<string, SessionId[]>()
+  const unsourced = new Set<SessionId>()
+  for (const id of list.ids) {
+    const summary = list.byId[id]
+    if (summary === undefined || !sessionVisible(summary, current, archived, archivedFilter)) continue
+    const source = sessionSource(summary)
+    if (source === undefined) {
+      unsourced.add(summary.id)
+      continue
+    }
+    const bucket = buckets.get(source)
+    if (bucket === undefined) buckets.set(source, [summary.id])
+    else bucket.push(summary.id)
+  }
+  const groups: Group[] = [...buckets.keys()]
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((source) => {
+      const members: SessionSummary[] = []
+      for (const id of orderByRecency(buckets.get(source) ?? [], list.byId)) {
+        const member = list.byId[id]
+        if (member !== undefined) members.push(member)
+      }
+      return buildGroup(
+        sourceGroupKey(source), undefined, undefined, undefined, source, members, source,
+      )
+    })
+  groups.push(...groupByWorkspace(
+    list, workspaces, archived, archivedFilter, ungroupedOrder,
+    summary => unsourced.has(summary.id), true,
+  ))
   return groups
 }
 
@@ -430,7 +567,7 @@ function sessionNode(
  * @param workspaces - real Workspaces in Host group order with caller-projected Session order.
  * @param rowState - registry-global pin and archive sets plus the archived filter.
  * @param statuses - unified UI status by Session.
- * @param view - local expansion arrays.
+ * @param view - local expansion arrays and the grouping dimension.
  * @returns group sections in render order.
  */
 export function deriveGroups(
@@ -443,16 +580,21 @@ export function deriveGroups(
   const archived = new Set(rowState.archivedSessionIds)
   const pinned = new Set(rowState.pinnedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
+  const mode = view.mode ?? 'workspace'
   const current = mainSessionId(list)
   const currentGroup = current === undefined
     ? undefined
-    : owningGroupKey(workspaces, current)
+    : sessionGroupKey(list, workspaces, current, mode)
   const groups: GroupNode[] = []
-  for (const g of groupByWorkspace(list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder)) {
+  const derived = mode === 'source'
+    ? groupBySource(list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder)
+    : groupByWorkspace(list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder)
+  for (const g of derived) {
     const expanded = expandedGroups.has(g.key)
     groups.push({
       key: g.key,
       workspaceId: g.workspaceId,
+      ...(g.sourceId === undefined ? {} : { sourceId: g.sourceId }),
       cwd: g.cwd,
       createdAt: g.createdAt,
       label: g.label,
