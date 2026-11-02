@@ -40,6 +40,7 @@ apps/web/dist/
 .artifacts/
 .dsh-build/
 .dsh-report/
+.detached/
 .playwright-mcp/
 .orig
 .worktrees/
