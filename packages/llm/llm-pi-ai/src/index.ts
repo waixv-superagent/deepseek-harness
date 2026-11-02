@@ -79,6 +79,9 @@ export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
 export type { PiAiRequestHeaderContext } from './types.ts'
 export { Config } from './config.ts'
+// Out-of-tree plugins that build a provider profile table import this from the package root; the runtime export keeps
+// the documented entry usable without reaching into `src/config.ts`.
+export { resolveProfiles }
 export type {
   Options,
   PiAiCompatProfile,
