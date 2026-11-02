@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-09-mcp-streamable-http-session-recovery.md
+2026-09-09-mcp-streamable-http-session-recovery.md: d4634a0427db5a1331092a94de6464d9ae2ab087
+2026-09-09-mcp-streamable-http-session-recovery.zh.md: dc85a310ace9c3d35d89464431c3204d896b76fa
