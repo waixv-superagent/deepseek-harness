@@ -49,7 +49,7 @@ function outputText(blocks: ContentBlock[]): string {
     .join('')
 }
 
-/** A short display label derived from the prompt when the script passes none. */
+/** A short display label derived from the prompt when the script passes none; it also names the child session. */
 function defaultLabel(prompt: string): string {
   const newline = prompt.indexOf('\n')
   const line = newline === -1 ? prompt : prompt.slice(0, newline)
@@ -277,6 +277,7 @@ export class WorkflowExecution {
       try {
         run = await this.children.startAgent({
           prompt: rawPrompt,
+          label,
           ...opts.schema !== undefined ? { schema: opts.schema } : {},
           ...opts.provider !== undefined ? { provider: opts.provider } : {},
           ...opts.model !== undefined ? { model: opts.model } : {},

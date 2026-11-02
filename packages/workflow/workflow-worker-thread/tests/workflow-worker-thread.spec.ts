@@ -246,6 +246,19 @@ describe('dsh-workflow-worker-thread', { timeout: 120_000 }, () => {
       expect(provider.runs[0]!.request.agentOptions).toEqual({ provider: 'openai' })
     })
 
+    it('persists the call label as the child start request label', async () => {
+      const { ctx, parent, provider } = await setup()
+      const result = await run(ctx, parent, scripted(`
+        await agent('a prompt whose first line names the child')
+        await agent('unnamed call', { label: 'ask gpt-5.6-terra' })
+        return null
+      `))
+
+      expect(result.value).toBeNull()
+      expect(provider.runs[0]!.request.label).toBe('a prompt whose first line names the child')
+      expect(provider.runs[1]!.request.label).toBe('ask gpt-5.6-terra')
+    })
+
     it('a start-request provider override selects every child without changing the engine default', async () => {
       const { ctx, parent, provider } = await setup()
       const selected = new StubProvider('selected', () => text('selected reply'))

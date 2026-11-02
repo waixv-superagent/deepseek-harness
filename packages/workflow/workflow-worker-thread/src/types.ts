@@ -40,6 +40,8 @@ export interface WorkerInit {
 export interface ChildStartRequest {
   /** The child's prompt text. */
   prompt: string
+  /** The child's display label, persisted as its durable creation name. */
+  label: string
   /** The structured-output schema, if the call passed one (already subset-checked). */
   schema?: ObjectJsonSchema
   /** The per-child provider override, if the call passed one. */

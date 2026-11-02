@@ -354,6 +354,7 @@ export class WorkerRun implements WorkflowRun {
     try {
       run = await this.subagents.start(this.provider, {
         prompt: [{ type: 'text', text: request.prompt }],
+        label: request.label,
         parent: this.parent,
         signal: this.controller.signal,
         ...request.schema !== undefined ? { outputSchema: request.schema } : {},
