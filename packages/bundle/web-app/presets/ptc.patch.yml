@@ -124,6 +124,8 @@
               searchTimeoutMs: 60000
           - id: tool-executor-ptc
             name: '@deepseek-ai/dsh-tool-executor-ptc'
+            config:
+              lazyTools: ['mcp__*']
           - id: present
             name: '@deepseek-ai/dsh-tool-present'
           - id: tool-plugin-manager

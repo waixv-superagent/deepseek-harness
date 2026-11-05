@@ -4076,10 +4076,17 @@ export interface Config {
 - `source`: [`packages/core/tool-executor-ptc/src/config.ts:5`](../packages/core/tool-executor-ptc/src/config.ts)
 
 ```ts config-catalog
-/** Program execution limits. */
+/** Program execution limits and SDK presentation controls. */
 export interface Config {
   /** Maximum overlapping concurrency-safe program subcalls. */
   maxParallelSubCalls: number
+  /**
+   * Tool-name patterns whose SDK declarations stay compact: `*` matches any
+   * run of characters and `?` matches one character. A compact declaration
+   * keeps the generic `JsonValue` argument and result types and drops the
+   * inline schema; `describe_tools` serves the exact schema on demand.
+   */
+  lazyTools: string[]
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-executor-ptc -->
