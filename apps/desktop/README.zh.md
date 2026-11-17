@@ -16,6 +16,7 @@ Desktop 在原生应用中运行 Harness 工作区。本参考文档说明应用
 - [终端命令](#terminal-command)
 - [关闭窗口与退出](#closing-the-window-and-quitting)
 - [Host 生命周期与重新连接](#host-lifetime-and-reconnecting)
+- [显示远程 Web 主机](#displaying-a-remote-web-host)
 - [关键技术决策](#key-technical-decisions)
 - [内置命令运行时](#bundled-command-runtime)
 - [安装归属](#installation-ownership)
@@ -91,6 +92,16 @@ Windows 在整个运行期间常驻托盘图标。悬停提示为产品名，单
 每次启动都先探测该记录，再决定是否拉起 Host。一个能通过认证控制端点回答、属于同一 profile、同一应用构建的 Host 会出现在启动窗口里；否则启动窗口显示启动进度并继续自动拉起。窗口在工作区之前显示，决策期间不能被关闭：Enter 或 Escape 执行主操作。**连接到这个 Host** 会保留它的会话和运行中任务；**停止并重新拉起 Host** 会先请求它优雅退出，再启动新的 Host。记录属于其他构建、其他 profile 或进程无响应时，只提供重新拉起。窗口会说明是否有任务在运行，并重复上次退出停止的内容。它的渲染进程与 Welcome 一样隔离：私有 preload 只暴露当前展示和所选操作，任何 Host 凭证都不会进入窗口。
 
 连接后的 Host 通过认证控制端点提供与自有 IPC 通道相同的事实：退出前检查、更新准入与任务检查、会话级文件拖拽授权、优雅关闭，以及供内嵌 Platform 视图使用的最新凭证快照（壳会轮询该快照）。端点只绑定 `127.0.0.1`，要求把发现文件中的 token 作为 bearer 凭证，且从不携带 Host 认证 cookie。覆盖更新仍然先停止 Host 再安装；连接状态下的 Host 若在截止时间内未完成任务清理，会被终止并拒绝安装，与自有子进程一致。发现记录已不响应、但其进程仍占着 profile 时，既无法连接也无法自动替换；此时拉起新 Host 会由正常的致命错误恢复到 profile 或地址冲突的提示。
+
+<a id="displaying-a-remote-web-host"></a>
+
+## 显示远程 Web 主机
+
+安装版可以把服务放在独立的 DSH Web 进程里，例如承载打包 Electron Host 无法使用的插件的 Node `dsh` 服务。把这些进程的 URL 写入 `$DSH_HOME/profiles/desktop/remote-web.url`：每个非注释行一个 HTTP(S) URL，按探测顺序排列。以 `@` 开头的行指向另一个文件并读取其中的行，启动脚本因此可以指向它每次启动都会重写的 token 文件。`DSH_DESKTOP_REMOTE_WEB_URL` 用一个 URL 覆盖该文件，`DSH_DESKTOP_REMOTE_WEB_FILE` 指定另一个文件。带凭证的 URL 会被拒绝。
+
+启动时壳依次探测每个候选并等待四秒，把第一个应答的地址显示在主窗口。窗口加载该 Host 自己的页面、boot injections、客户端插件和面板路由；它不安装 Desktop preload，因此页面就是普通的 Web 应用，并使用原生窗口边框而不是壳的集成标题栏。登录、语言和账号状态都来自该 Host；此模式下壳不会显示自己的欢迎窗口。内置 Host 仍会启动并提供壳自身的能力——更新、退出前检查、文件拖拽授权和内嵌 Platform 视图——但不会阻塞窗口；关闭窗口仍照常隐藏。
+
+所有候选都不应答、读取候选失败或配置文件格式错误时，壳记录问题并按原样启动内置 Host。远程 Host 在窗口加载后停止应答时，由正常的致命错误恢复界面报告。
 
 <a id="key-technical-decisions"></a>
 

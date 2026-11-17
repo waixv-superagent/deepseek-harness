@@ -16,6 +16,7 @@ Desktop runs the Harness workspace in a native application. This reference cover
 - [Terminal command](#terminal-command)
 - [Closing the window and quitting](#closing-the-window-and-quitting)
 - [Host lifetime and reconnecting](#host-lifetime-and-reconnecting)
+- [Displaying a remote Web host](#displaying-a-remote-web-host)
 - [Key technical decisions](#key-technical-decisions)
 - [Bundled command runtime](#bundled-command-runtime)
 - [Installation ownership](#installation-ownership)
@@ -91,6 +92,16 @@ The shell starts the Host as a detached service process. Once ready, the Host wr
 Every launch probes the record before starting a Host. A Host that answers the authenticated control endpoint, belongs to the same profile, and runs the same application build is offered in a launch window; otherwise the window shows the start progress and startup continues. The window is shown before the workspace and cannot be closed while the decision is pending: Enter or Escape takes the primary action. **Connect to this Host** attaches to it, keeping its sessions and running tasks; **Stop it and start a new Host** asks it to shut down gracefully before a fresh Host starts. A record that belongs to another build, another profile, or an unresponsive process offers only the restart. The window reports whether running tasks are active and repeats what the last exit stopped. Its renderer is isolated like Welcome: a private preload exposes only the presentation and the chosen option, and no Host credential reaches it.
 
 An attached Host carries the same facts the owned IPC channel does over the authenticated control endpoint: quit inspection, update admission and task inspection, Session-scoped file-drag authorization, graceful shutdown, and the latest Platform credential snapshot for embedded views (the shell polls that snapshot). The endpoint binds only `127.0.0.1`, requires the discovery token as a bearer credential, and never carries the Host authentication cookie. In-place updates still stop the Host before installing; an attached Host that cannot finish task teardown within the deadline is terminated and the installation is refused, exactly as for an owned child. A discovery record that no longer answers while its process still holds the profile cannot be attached or replaced automatically; spawning then reports the profile or address conflict through the normal fatal recovery.
+
+<a id="displaying-a-remote-web-host"></a>
+
+## Displaying a remote Web host
+
+An installation may keep its service in a separate DSH Web process, such as a Node `dsh` service that carries plugins a packaged Electron Host cannot use. Write the URLs of those processes to `$DSH_HOME/profiles/desktop/remote-web.url`: one HTTP(S) URL per non-comment line, in probe order. A line starting with `@` names another file whose lines are read instead, so a launcher can point at a token file it rewrites on every service start. `DSH_DESKTOP_REMOTE_WEB_URL` overrides the file with one URL and `DSH_DESKTOP_REMOTE_WEB_FILE` names a different file. URLs carrying credentials are rejected.
+
+At launch the shell probes each candidate for four seconds and displays the first that answers in the main window. The window loads that Host's own pages, boot injections, client plugins, and panel routes; it installs no Desktop preload, so the page is the ordinary Web application and keeps the native window frame rather than the shell's integrated title bar. Sign-in, locale, and account state come from that Host; the shell never shows its Welcome window in this mode. The bundled Host still starts and serves the shell's own features — updates, quit inspection, file drag authorization, and embedded Platform views — without holding back the window, and closing the window hides it as usual.
+
+When no candidate answers, a candidate read fails, or the configured file is malformed, the shell logs the problem and starts its bundled Host as before. A remote Host that stops answering after the window loaded surfaces through the normal fatal-recovery screen.
 
 <a id="key-technical-decisions"></a>
 

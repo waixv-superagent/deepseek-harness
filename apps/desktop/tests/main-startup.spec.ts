@@ -1491,6 +1491,28 @@ describe('desktop main startup', () => {
     expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
   })
 
+  it('displays a configured remote Web host instead of the bundled shell page', async () => {
+    vi.stubEnv('DSH_DESKTOP_REMOTE_WEB_URL', 'http://127.0.0.1:3082/?token=test')
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 303 })))
+    await import('../src/main.ts')
+    await harness.preparing.promise
+    harness.prepared.resolve()
+    await harness.hostStarted.promise
+    harness.hosts[0]!.ready.resolve()
+    await vi.waitFor(() => {
+      expect(harness.windows[0]!.urls).toEqual(['http://127.0.0.1:3082/?token=test'])
+    })
+    // The bundled Host still serves the shell's own features; only the displayed page is remote.
+    expect(harness.hosts).toHaveLength(1)
+  })
+
+  it('keeps the bundled Host when the configured remote Web host does not answer', async () => {
+    vi.stubEnv('DSH_DESKTOP_REMOTE_WEB_URL', 'http://127.0.0.1:3082/?token=test')
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNREFUSED') }))
+    await readyForUpdate()
+    expect(harness.windows[0]!.urls).toEqual(['dsh-app://app/'])
+  })
+
   it('retains macOS native editing actions on right-click and only copy for selected read-only text', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
     await import('../src/main.ts')
