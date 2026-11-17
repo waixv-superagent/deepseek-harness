@@ -140,7 +140,7 @@ h1 {
   40% { opacity: 1; transform: translateY(-3px); }
 }
 
-.options { display: flex; flex-direction: column; gap: 10px; -webkit-app-region: no-drag; }
+.options { display: flex; flex-direction: column; gap: 10px; -webkit-app-region: no-drag; max-height: 420px; overflow-y: auto; }
 
 .option {
   all: unset;
@@ -179,6 +179,39 @@ h1 {
   color: var(--lc-muted);
 }
 .footnote[hidden] { display: none; }
+
+.manual-form { display: flex; flex-direction: column; gap: 12px; -webkit-app-region: no-drag; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field-label { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--lc-muted); }
+.field-input {
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--lc-card-border);
+  background: var(--lc-card);
+  color: var(--lc-title);
+  font: inherit;
+  font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.field-input:focus { outline: none; border-color: var(--lc-accent); box-shadow: 0 0 0 3px var(--lc-accent-soft); }
+.form-origin {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--lc-title);
+  -webkit-user-select: text;
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+.form-error { margin: 0; font-size: 12px; line-height: 18px; color: #b91c1c; }
+.form-error[hidden] { display: none; }
+.form-actions { display: flex; gap: 10px; }
+.action { flex: 1; align-items: center; padding: 11px 14px; }
+
+@media (prefers-color-scheme: dark) {
+  .form-error { color: #fca5a5; }
+}
 
 .busy .option { opacity: 0.55; }
 .busy .option.primary { opacity: 1; }

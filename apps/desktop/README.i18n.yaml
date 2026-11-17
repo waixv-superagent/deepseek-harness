@@ -12,17 +12,26 @@
   en: 7bc8bf30de693222
   zh: e85993d8852b6cab
 /deepseek-harness-desktop/table-of-contents:
-  en: 127ea90553cb6af7
-  zh: 7b1c5aec8558c684
+  en: b5d13d5951c5b9d7
+  zh: c6b1f70945931618
 /deepseek-harness-desktop/application-overview:
-  en: d4afa46403997884
-  zh: 9b9fe126afda70f0
+  en: 3e53bf2ee0567d27
+  zh: 77fdb2fa94d1c30a
 /deepseek-harness-desktop/terminal-command:
   en: 5f2d25a1d8472647
   zh: 2acb5c5d7d1917e2
 /deepseek-harness-desktop/closing-the-window-and-quitting:
-  en: bb35a022c37955c9
-  zh: ab2ef22d398d83a0
+  en: 3af539c0d6f88406
+  zh: 37f2aaeeda17c4bb
+/deepseek-harness-desktop/host-lifetime-and-reconnecting:
+  en: aae357266392791d
+  zh: 92ffbd9466c3e01a
+/deepseek-harness-desktop/remote-hosts:
+  en: 905bfaa41905e8e4
+  zh: 97e75efe28a9c262
+/deepseek-harness-desktop/displaying-a-remote-web-host:
+  en: 5c6ec33ce3accd68
+  zh: 1bde318882848fe0
 /deepseek-harness-desktop/key-technical-decisions:
   en: 3724c53da4f7647b
   zh: 76ae549d43c99bb4

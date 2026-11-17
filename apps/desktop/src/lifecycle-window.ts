@@ -2,7 +2,7 @@
 
 import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
-import { LIFECYCLE_IPC, type LifecycleChoice, type LifecycleState } from './lifecycle-ipc.ts'
+import { LIFECYCLE_IPC, parseLifecycleChoice, type LifecycleChoice, type LifecycleState } from './lifecycle-ipc.ts'
 
 /**
  * The one launch window of this process.
@@ -33,7 +33,7 @@ export class DesktopLifecycleWindow {
     this.disposeHandlers()
     const window = new BrowserWindow({
       width: 640,
-      height: 470,
+      height: 620,
       useContentSize: true,
       center: true,
       resizable: false,
@@ -64,25 +64,26 @@ export class DesktopLifecycleWindow {
       assertSender(event)
       return this.presentation
     })
-    ipcMain.handle(LIFECYCLE_IPC.choose, (event, choice: unknown) => {
+    ipcMain.handle(LIFECYCLE_IPC.choose, (event, value: unknown) => {
       assertSender(event)
-      if (choice !== 'connect' && choice !== 'restart') throw new Error('desktop lifecycle: invalid choice')
+      const choice = parseLifecycleChoice(value)
+      if (choice === undefined) throw new Error('desktop lifecycle: invalid choice')
       this.accept(choice)
     })
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     window.webContents.on('will-navigate', (event) => { event.preventDefault() })
     window.on('close', (event) => {
       if (this.closing || this.disposed) return
-      // Closing the launch window means "continue with the default", never "leave the shell without
-      // a Host"; the native frame is otherwise not closable during startup.
+      // Closing the window means "continue with the default", never "leave the shell without a way
+      // to start"; the native frame is otherwise not closable during startup.
       event.preventDefault()
-      this.accept(this.presentation?.primary?.choice ?? 'restart')
+      this.accept(this.fallbackChoice())
     })
     window.once('closed', () => {
       if (this.window === window) this.window = undefined
       this.disposeHandlers()
       // A renderer crash must not strand startup: continue with the default.
-      this.accept(this.presentation?.primary?.choice ?? 'restart')
+      this.accept(this.fallbackChoice())
     })
     window.once('ready-to-show', () => {
       if (!this.closing && !window.isDestroyed()) window.show()
@@ -105,9 +106,17 @@ export class DesktopLifecycleWindow {
     if (window !== undefined && !window.isDestroyed()) window.webContents.send(LIFECYCLE_IPC.state, state)
   }
 
-  /** @returns the option a person activated; the default when the window closes first. */
+  /**
+   * The next answer the window reported, or a promise that settles when it does. A reported answer
+   * is consumed: a caller that re-asks after `update` gets the next one instead of the same one.
+   * @returns the option a person activated; the default when the window closes first.
+   */
   choose(): Promise<LifecycleChoice> {
-    if (this.accepted !== undefined) return Promise.resolve(this.accepted)
+    if (this.accepted !== undefined) {
+      const accepted = this.accepted
+      this.accepted = undefined
+      return Promise.resolve(accepted)
+    }
     if (this.pendingChoice === undefined) {
       const { promise, resolve } = Promise.withResolvers<LifecycleChoice>()
       this.pendingChoice = { promise, resolve }
@@ -135,6 +144,15 @@ export class DesktopLifecycleWindow {
     const window = this.window
     this.window = undefined
     if (window !== undefined && !window.isDestroyed()) window.destroy()
+  }
+
+  /** The default when the window closes without a reported answer. */
+  private fallbackChoice(): LifecycleChoice {
+    const state = this.presentation
+    // A credential window answers an HTTP challenge; closing it must refuse the challenge rather
+    // than start a local Host the window never offered.
+    if (state?.phase === 'credentials' || state?.credentials !== undefined) return { choice: 'cancel' }
+    return state?.primary?.choice ?? { choice: 'spawn' }
   }
 
   private accept(choice: LifecycleChoice): void {

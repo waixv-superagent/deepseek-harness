@@ -483,6 +483,8 @@ beforeEach(() => {
   vi.stubEnv('DSH_DESKTOP_DEV_PROJECT_DIR', undefined)
   vi.stubEnv('DSH_DESKTOP_MANDATORY_UPDATE_CONFIG', undefined)
   vi.stubEnv('DSH_DESKTOP_UPDATE_JOURNAL_DIR', undefined)
+  // The packaged launch scans the network for remote gateways; unit tests must stay off it.
+  vi.stubEnv('DSH_DESKTOP_REMOTE_DISCOVERY', '0')
   vi.stubEnv('DSH_CLIENT_VERSION', '1.2.3')
   harness.analyticsEnabled = true
 })
