@@ -1,4 +1,4 @@
-/** Native quit confirmation; quitting proceeds silently only when the Host reports nothing to interrupt. */
+/** Quit confirmation: what stopping the Host would interrupt, and whether the user keeps it running. */
 
 import type { MessageBoxOptions, MessageBoxReturnValue, NativeImage } from 'electron'
 import type { DesktopQuitInspection } from './host-process.ts'
@@ -6,6 +6,14 @@ import type { DesktopLocale, DesktopMessages } from './locale.ts'
 
 /** Locale key of the explanation shown before quitting, or none when quitting interrupts nothing. */
 export type DesktopQuitPrompt = Extract<keyof DesktopMessages, 'quitActiveTasks' | 'quitScheduledTasks' | 'quitActiveAndScheduledTasks'> | undefined
+
+/** What the shell does after an approved quit. */
+export interface DesktopQuitDecision {
+  /** True stops the Host; false lets a detached Host keep running in the background. */
+  readonly stopHost: boolean
+  /** The inspection the dialog explained, or `unknown` when it failed. */
+  readonly inspection: DesktopQuitInspection | 'unknown'
+}
 
 /**
  * Choose the confirmation copy for one inspection result.
@@ -36,18 +44,20 @@ export interface DesktopQuitConfirmationOptions {
 
 /** One quit decision at a time; repeated quit requests join the open confirmation instead of stacking. */
 export class DesktopQuitConfirmation {
-  private pending: Promise<boolean> | undefined
+  private pending: Promise<DesktopQuitDecision | false> | undefined
   private disposed = false
 
   /** @param options - Locale, inspection, and native dialog collaborators. */
   constructor(private readonly options: DesktopQuitConfirmationOptions) {}
 
   /**
-   * Decide whether the quit may proceed. The inspection runs once per decision; work that starts or ends
-   * while the confirmation is open does not change its copy, and approval never re-inspects.
-   * @returns true to quit now, false when the user cancelled.
+   * Decide whether the quit may proceed and whether the Host stops with it.
+   * The box asks even when nothing is running while a Host is ready: its checkbox is how a person
+   * chooses between closing the App and stopping the Host. A second request joins the open decision;
+   * approval never re-inspects.
+   * @returns the decision, or false when the user cancelled.
    */
-  confirm(): Promise<boolean> {
+  confirm(): Promise<DesktopQuitDecision | false> {
     if (this.disposed) return Promise.resolve(false)
     if (this.pending !== undefined) {
       this.options.focus()
@@ -65,17 +75,21 @@ export class DesktopQuitConfirmation {
    */
   dispose(): void { this.disposed = true }
 
-  private async decide(): Promise<boolean> {
+  private async decide(): Promise<DesktopQuitDecision | false> {
     const inspection = this.options.inspect()
-    if (inspection === undefined) return true
-    const prompt = resolveDesktopQuitPrompt(await inspection.catch((error: unknown) => {
+    if (inspection === undefined) return { stopHost: true, inspection: 'unknown' }
+    const outcome: DesktopQuitInspection | 'unknown' = await inspection.catch((error: unknown) => {
       console.warn('desktop quit: task inspection unavailable', error)
       return 'unknown' as const
-    }))
+    })
     if (this.disposed) return false
-    if (prompt === undefined) return true
+    const prompt = resolveDesktopQuitPrompt(outcome)
     const { messages } = this.options.locale()
     const windows = (this.options.platform ?? process.platform) === 'win32'
+    // The checkbox is the lifecycle choice: checked (the current behaviour) stops the Host, while
+    // unchecking leaves a detached Host running for the next launch to connect to. A ready Host
+    // always asks, because even idle it may be serving Sources a person wants left online.
+    const detail = prompt === undefined ? messages.quitHostKeepNote : `${messages[prompt]}\n${messages.quitHostKeepNote}`
     // Button order follows each platform: macOS lays buttons out right-to-left from index 0, so
     // "Quit" sits right of "Cancel"; the Windows task dialog keeps array order, "Quit" left of "Cancel".
     const result = await this.options.show({
@@ -83,7 +97,9 @@ export class DesktopQuitConfirmation {
       ...(windows && this.options.icon !== undefined ? { icon: this.options.icon } : {}),
       title: messages.aboutProduct,
       message: messages.quitTitle,
-      detail: messages[prompt],
+      detail,
+      checkboxLabel: messages.quitStopHost,
+      checkboxChecked: true,
       buttons: [messages.quit, messages.cancel],
       defaultId: 0,
       cancelId: 1,
@@ -91,6 +107,7 @@ export class DesktopQuitConfirmation {
     })
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- A bypassing quit can dispose while the box is open.
     if (this.disposed) return false
-    return result.response === 0
+    if (result.response !== 0) return false
+    return { stopHost: result.checkboxChecked, inspection: outcome }
   }
 }

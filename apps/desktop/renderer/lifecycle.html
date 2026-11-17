@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <title></title>
+    <link rel="stylesheet" href="lifecycle.css">
+    <script src="lifecycle.js" defer></script>
+  </head>
+  <body>
+    <main id="panel" class="panel" role="dialog" aria-modal="true" aria-labelledby="title" aria-describedby="detail">
+      <header class="head">
+        <span class="mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+        <div class="heading">
+          <p class="brand">DeepSeek Harness</p>
+          <h1 id="title">DeepSeek Harness</h1>
+          <p id="detail" class="detail"></p>
+        </div>
+      </header>
+      <div id="progress" class="progress" role="status" hidden aria-label="Loading">
+        <span></span><span></span><span></span>
+      </div>
+      <div id="options" class="options"></div>
+      <p id="footnote" class="footnote" hidden></p>
+    </main>
+  </body>
+</html>

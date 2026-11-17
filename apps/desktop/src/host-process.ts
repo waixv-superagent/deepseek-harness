@@ -1,7 +1,8 @@
 /** Electron Node-mode child lifecycle for the shared Web application. */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { join } from 'node:path'
+import { closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import type { PlatformSession } from '@deepseek-ai/dsh-deepseek-account'
 import { desktopNodeEnvironment } from './node-environment.ts'
@@ -154,6 +155,32 @@ export class DesktopHostFatalError extends Error {
   get diagnostic(): string | undefined { return this.#diagnostic }
 }
 
+/** Files a service Host needs so it can outlive this shell: its discovery record and its log. */
+export interface DesktopHostServiceFiles {
+  readonly discoveryPath: string
+  readonly logPath: string
+}
+
+/** The last bytes of a service Host's log stand in for the stderr pipe an owned child had. */
+const MAX_LOG_TAIL_BYTES = 16 * 1024
+
+/**
+ * Read the tail of one file without loading a long-running Host log.
+ * @param path - Host log file.
+ * @returns the last {@link MAX_LOG_TAIL_BYTES} as text, or an empty string when unavailable.
+ */
+function readLogTail(path: string): string {
+  try {
+    const size = statSync(path).size
+    const length = Math.min(size, MAX_LOG_TAIL_BYTES)
+    if (length === 0) return ''
+    const buffer = Buffer.alloc(length)
+    const descriptor = openSync(path, 'r')
+    try { readSync(descriptor, buffer, 0, length, size - length) } finally { closeSync(descriptor) }
+    return buffer.toString('utf8').trim()
+  } catch { return '' }
+}
+
 /** One Web backend running under the Electron executable in Node mode. */
 export class DesktopHostProcess {
   private runId: PluginOperationRunId | undefined
@@ -187,6 +214,8 @@ export class DesktopHostProcess {
    * @param packageManager - Bundled pnpm entry and Node launcher directory, scoped to package operations.
    * @param onPlatformSession - Private credential updates for embedded Platform views.
    * @param onPluginOperation - Optional diagnostic sink; malformed records are ignored without failing the Host.
+   * @param service - When present, spawn a Host that keeps running after this shell exits and publish
+   *   its discovery record; its inherited pipes are replaced by a log file.
    */
   constructor(
     private readonly node: string,
@@ -200,6 +229,7 @@ export class DesktopHostProcess {
 
     private readonly onPlatformSession?: (session: PlatformSession | null) => void,
     private readonly onPluginOperation?: (record: PluginOperationRecord) => void,
+    private readonly service?: DesktopHostServiceFiles,
   ) {}
 
   /**
@@ -209,6 +239,9 @@ export class DesktopHostProcess {
   async start(): Promise<DesktopHostReady> {
     if (this.child !== undefined) return this.readyPromise
     const entry = join(this.runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'index.js')
+    // A detached Host must not inherit a pipe that closes with this process; the log file keeps its
+    // diagnostics available to the next shell after that.
+    const log = this.openServiceLog()
     const child = spawn(this.node, [
       '--expose-internals',
       ...(this.inspectPort === undefined ? [] : [`--inspect=127.0.0.1:${String(this.inspectPort)}`]),
@@ -219,10 +252,20 @@ export class DesktopHostProcess {
       ...this.packageManager === undefined ? [] : [this.packageManager.pnpm, this.packageManager.nodeBin],
     ], {
       cwd: this.projectDir,
-      env: desktopNodeEnvironment(this.node, undefined, this.environment),
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      env: {
+        ...desktopNodeEnvironment(this.node, undefined, this.environment),
+        ...(this.service === undefined ? {} : { DSH_DESKTOP_DISCOVERY: this.service.discoveryPath }),
+      },
+      stdio: ['ignore', log ?? 'pipe', log ?? 'pipe', 'ipc'],
+      ...(this.service === undefined ? {} : { detached: true }),
     })
+    if (log !== undefined) closeSync(log)
     this.child = child
+    if (this.service !== undefined) {
+      child.unref()
+      // The IPC channel is a handle of its own; unref it so the shell can exit while the Host runs.
+      child.channel?.unref()
+    }
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => { this.stderr = (this.stderr + chunk).slice(-MAX_HOST_DIAGNOSTIC_CHARS) })
     child.stdout?.pipe(process.stdout)
@@ -260,13 +303,29 @@ export class DesktopHostProcess {
     child.once('error', (error) => { this.fail(error) })
     this.exitPromise = new Promise<void>((resolve) => {
       child.once('close', (code) => {
-        const suffix = this.stderr.trim() === '' ? '' : `: ${this.stderr.trim()}`
+        const output = this.hostOutput()
+        const suffix = output === '' ? '' : `: ${output}`
         if (code !== 0 && code !== null) this.fail(new Error(`dsh desktop host exited with ${String(code)}${suffix}`))
         else this.fail(new Error(`dsh desktop host stopped${suffix}`))
         resolve()
       })
     })
     return this.readyPromise
+  }
+
+  /** Open the service log for append, or undefined to keep the inherited pipes of an owned Host. */
+  private openServiceLog(): number | undefined {
+    if (this.service === undefined) return undefined
+    try {
+      mkdirSync(dirname(this.service.logPath), { recursive: true })
+      return openSync(this.service.logPath, 'a')
+    } catch { return undefined }
+  }
+
+  /** The stderr pipe of an owned Host, or the tail of the service log once that pipe is gone. */
+  private hostOutput(): string {
+    if (this.stderr.trim() !== '') return this.stderr.trim()
+    return this.service === undefined ? '' : readLogTail(this.service.logPath)
   }
 
   /**

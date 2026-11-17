@@ -326,6 +326,7 @@ vi.mock('electron', () => ({
   } },
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: harness.protocolHandle },
   powerMonitor: harness.powerMonitor,
+  screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] },
   Tray: harness.FakeTray,
   nativeImage: { createFromPath: (path: string) => ({ path }) },
 }))
@@ -461,7 +462,12 @@ beforeEach(() => {
   onTestFinished(() => { rmSync(userData, { recursive: true, force: true }) })
   harness.app.getPath.mockImplementation(name => name === 'userData' ? userData : join(userData, `desktop-test-${name}`))
   vi.mocked(writeCrashReport).mockResolvedValue(join(harness.app.getPath('logs'), 'crash-test.log'))
-  harness.dialog.showMessageBox.mockImplementation((options: { title?: string }) => {
+  harness.dialog.showMessageBox.mockImplementation((options: { title?: string; message?: string }) => {
+    // A ready Host always asks before quitting now; these tests exercise the ordinary path, which
+    // keeps the default "also stop the Host" choice.
+    if (options.message === en.quitTitle || options.message === zh.quitTitle) {
+      return Promise.resolve({ response: 0, checkboxChecked: true })
+    }
     if (options.title !== en.startupFailed && options.title !== zh.startupFailed) return Promise.resolve({ response: 1 })
     harness.dialogShown.resolve()
     return new Promise(() => {})
@@ -484,6 +490,13 @@ beforeEach(() => {
 afterEach(async () => {
   harness.prepared.resolve()
   for (const host of harness.hosts) { host.ready.resolve(); host.exited.resolve() }
+  // The exit cleanup quits through the same dialog; a queued one-shot answer from the test must not
+  // turn that quit into a cancellation that never completes.
+  harness.dialog.showMessageBox.mockReset()
+  harness.dialog.showMessageBox.mockImplementation((options: { message?: string }) => {
+    if (options.message === en.quitTitle || options.message === zh.quitTitle) return Promise.resolve({ response: 0, checkboxChecked: true })
+    return Promise.resolve({ response: 1 })
+  })
   harness.app.quit()
   // The quit decides asynchronously; a Host that starts meanwhile must still be released.
   await vi.advanceTimersByTimeAsync(0)
@@ -978,6 +991,10 @@ describe('desktop main startup', () => {
     try {
       await import('../src/main.ts')
       await explained.promise
+      // The product window exists before the Host and has not navigated yet; product IPC comes
+      // from the application frame, so this test presents that frame's URL explicitly.
+      const productWindow = harness.windows[0]!
+      productWindow.webContents.mainFrame.url = 'dsh-app://app/index.html'
       expect(harness.hosts).toHaveLength(0)
       expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
       expect(harness.dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({
@@ -989,6 +1006,7 @@ describe('desktop main startup', () => {
       explanation.resolve({ response: 0 })
       await entered.promise
       checks.push(Promise.resolve(invoke(DESKTOP_IPC.updatesOpen, 'app')))
+      await vi.advanceTimersByTimeAsync(0)
       expect(testAuth.focus).toHaveBeenCalled()
       expect(testAuth.login).toHaveBeenCalledOnce()
       expect(harness.dialog.showMessageBox).toHaveBeenCalledOnce()
@@ -1587,10 +1605,14 @@ describe('desktop main startup', () => {
     window.show.mockClear()
     window.focus.mockClear()
     harness.app.quit()
-    // The quit inspects the Host before hiding; nothing to interrupt means no dialog.
+    // The quit inspects the Host and always offers the Host lifetime choice, even when nothing would
+    // be interrupted; these tests keep the default "also stop the Host" answer.
     await vi.advanceTimersByTimeAsync(0)
     expect(host.inspectQuit).toHaveBeenCalledOnce()
-    expect(harness.dialog.showMessageBox).not.toHaveBeenCalled()
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      message: en.quitTitle, detail: en.quitHostKeepNote,
+      checkboxLabel: en.quitStopHost, checkboxChecked: true,
+    }))
     expect(window.hide).toHaveBeenCalledOnce()
     await host.stopping.promise
     harness.app.emit('second-instance')
@@ -1736,7 +1758,8 @@ describe('desktop main startup', () => {
     harness.app.quit()
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      message: en.quitTitle, detail: en.quitActiveAndScheduledTasks, buttons: [en.quit, en.cancel], defaultId: 0, cancelId: 1,
+      message: en.quitTitle, detail: `${en.quitActiveAndScheduledTasks}\n${en.quitHostKeepNote}`,
+      checkboxLabel: en.quitStopHost, checkboxChecked: true, buttons: [en.quit, en.cancel], defaultId: 0, cancelId: 1,
     }))
     expect(window.hide).not.toHaveBeenCalled()
     expect(host.stop).not.toHaveBeenCalled()
@@ -1750,12 +1773,25 @@ describe('desktop main startup', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(harness.dialog.showMessageBox).toHaveBeenCalledTimes(2)
     expect(host.inspectQuit).toHaveBeenCalledTimes(2)
-    pending.resolve({ response: 0, checkboxChecked: false })
+    pending.resolve({ response: 0, checkboxChecked: true })
     await vi.advanceTimersByTimeAsync(0)
     expect(window.hide).toHaveBeenCalledOnce()
     await host.stopping.promise
     host.exited.resolve()
     await harness.quitCompleted.promise
+  })
+
+  it('keeps the Host running when the quit dialog leaves it unchecked', async () => {
+    const host = await readyWorkspace()
+    const window = harness.windows[0]!
+    host.inspectQuit.mockResolvedValue({ activeTasks: true, scheduledTasks: false })
+    harness.dialog.showMessageBox.mockResolvedValue({ response: 0, checkboxChecked: false })
+    harness.app.quit()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(window.hide).toHaveBeenCalledOnce()
+    await harness.quitCompleted.promise
+    expect(host.stop).not.toHaveBeenCalled()
+    expect(harness.trays[0]!.destroy).toHaveBeenCalledOnce()
   })
 
   it('warns about running tasks when the inspection fails and quits directly on session end or a development restart', async () => {
@@ -1765,7 +1801,10 @@ describe('desktop main startup', () => {
     harness.dialog.showMessageBox.mockResolvedValue({ response: 1, checkboxChecked: false })
     harness.app.quit()
     await vi.advanceTimersByTimeAsync(0)
-    expect(harness.dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ detail: en.quitActiveTasks }))
+    expect(harness.dialog.showMessageBox).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      detail: `${en.quitActiveTasks}\n${en.quitHostKeepNote}`,
+      checkboxLabel: en.quitStopHost, checkboxChecked: true,
+    }))
     expect(host.stop).not.toHaveBeenCalled()
     const restart = applicationMenuItems().find(item => item.label === en.restartAppHostMenu)!
     harness.dialog.showMessageBox.mockClear()
