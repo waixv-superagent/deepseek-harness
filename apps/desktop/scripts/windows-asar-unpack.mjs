@@ -4,6 +4,13 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { readAsar } from 'app-builder-lib/out/asar/asar.js'
 import { windowsRuntimeCode } from './windows-runtime-signature.mjs'
 
+/** Non-PE files kept outside the ASAR: Electron 44's ASAR stream returns ENOENT for packed entries, and the chat client streams its animation images. */
+export const WINDOWS_ASAR_ASSET_PATTERNS = [
+  '**/lib/assets/**',
+  '**/*.png', '**/*.svg', '**/*.webp', '**/*.jpg', '**/*.jpeg', '**/*.gif', '**/*.ico',
+  '**/*.woff', '**/*.woff2', '**/*.ttf',
+]
+
 function inside(root, file) {
   const suffix = relative(root, file)
   return suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix)
@@ -42,7 +49,7 @@ export async function prepareWindowsAsarUnpack(context, sourceRoot) {
     })
   }
   const existing = config.asarUnpack ?? []
-  config.asarUnpack = [...(typeof existing === 'string' ? [existing] : existing),
+  config.asarUnpack = [...(typeof existing === 'string' ? [existing] : existing), ...WINDOWS_ASAR_ASSET_PATTERNS,
     ...files.map(file => unpackPattern(relative(appDir, join(copyRoot, file))))]
   return files
 }
