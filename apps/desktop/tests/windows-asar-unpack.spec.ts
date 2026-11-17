@@ -8,7 +8,7 @@ import { WinPackager } from 'app-builder-lib/out/winPackager.js'
 import { getFileMatchers } from 'app-builder-lib/out/fileMatcher.js'
 import { readAsar } from 'app-builder-lib/out/asar/asar.js'
 import { afterEach, expect, it, vi } from 'vitest'
-import { prepareWindowsAsarUnpack, verifyWindowsAsarUnpack } from '../scripts/windows-asar-unpack.mjs'
+import { prepareWindowsAsarUnpack, verifyWindowsAsarUnpack, WINDOWS_ASAR_ASSET_PATTERNS } from '../scripts/windows-asar-unpack.mjs'
 import { createElectronBuilderConfig } from '../scripts/electron-builder-config.mjs'
 import { verifyRuntimeArchive } from '../scripts/verify-runtime-archive.ts'
 import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/host-protocol.ts'
@@ -74,6 +74,10 @@ async function fixture(external: boolean) {
   }
   await writeFile(join(source, 'node_modules', 'foo', 'companion.json'), '{}')
   await writeFile(join(source, 'node_modules', 'foo', '$xarchy.binary'), 'neighbor')
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const asset = join(source, 'node_modules', '@deepseek-ai', 'dsh-client-ui-chat', 'lib', 'assets', 'running-whale@2x-fixture.png')
+  await mkdir(dirname(asset), { recursive: true })
+  await writeFile(asset, png)
   for (const [name, manifest] of [
     ['@deepseek-ai/libreoffice-kit', { name: '@deepseek-ai/libreoffice-kit', optionalDependencies: { '@deepseek-ai/libreoffice-kit-win32-x64': '0.0.4' }, dependencies: { 'office-codec': '1' } }],
     ['@deepseek-ai/libreoffice-kit-win32-x64', { name: '@deepseek-ai/libreoffice-kit-win32-x64' }],
@@ -98,7 +102,7 @@ async function fixture(external: boolean) {
   vi.spyOn(info, 'disposeOnBuildFinish').mockImplementation((cleanup) => { cleanups.push(cleanup) })
   const context: BeforePackContext = { packager: new WinPackager(info), arch: Arch.x64,
     appOutDir: dirname(resources), outDir: dirname(resources), electronPlatformName: 'win32', targets: [] }
-  return { root, appDir, source, resources, config, context, names }
+  return { root, appDir, source, resources, config, context, names, png, asset }
 }
 
 async function packageFixture(input: Awaited<ReturnType<typeof fixture>>) {
@@ -181,6 +185,17 @@ it.each([false, true])('unpacks PE files through builder source patterns (extern
     await expect(lstat(first.from)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(input.source, files[0]!))).toHaveLength(128)
   }
+})
+
+it.each([false, true])('unpacks streamed chat assets through builder source patterns (external=%s)', async (external) => {
+  const input = await fixture(external)
+  await prepareWindowsAsarUnpack(input.context, input.source)
+  expect(input.config.asarUnpack).toEqual(expect.arrayContaining(WINDOWS_ASAR_ASSET_PATTERNS))
+  await packageFixture(input)
+  const archive = await readAsar(join(input.resources, 'app.asar'))
+  const path = join('dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-chat', 'lib', 'assets', 'running-whale@2x-fixture.png')
+  expect(archive.getFile(path).unpacked).toBe(true)
+  expect(await readFile(join(input.resources, 'app.asar.unpacked', path))).toEqual(input.png)
 })
 
 it('rejects an inline PE even when a neighboring unpacked copy exists', async () => {

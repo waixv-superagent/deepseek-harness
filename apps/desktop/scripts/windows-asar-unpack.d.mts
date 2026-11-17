@@ -1,5 +1,8 @@
 import type { BeforePackContext } from 'app-builder-lib'
 
+/** Non-PE patterns installed beside the PE entries so streamed resources stay readable outside the ASAR. */
+export const WINDOWS_ASAR_ASSET_PATTERNS: readonly string[]
+
 /**
  * Install source-relative PE patterns in the active builder configuration.
  * @param context Active builder configuration and cleanup owner.
