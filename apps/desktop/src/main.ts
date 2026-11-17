@@ -747,16 +747,29 @@ async function main(): Promise<void> {
     finally { await Promise.all([operationJournal?.drain(500), reports]) }
   }
 
+  /** Start the shell's bundled Host and record readiness for update recovery. */
+  const startBundledHost = async (): Promise<void> => {
+    await backend.start(async () => {
+      await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
+    })
+    if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+  }
+
   const reconcileBackend = (): Promise<void> => {
     startup ??= (async () => {
-      // The remote Host loads after its Host start returns, so a local cookie cleanup cannot erase
-      // the authentication cookie the remote page's first request sets.
-      if (remoteWeb === undefined) await navigateMain(applicationUrl)
-      await backend.start(async () => {
-        await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
-      })
+      if (remoteWeb !== undefined) {
+        // The page comes from the remote Host; a bundled Host only serves the shell's own features,
+        // so its startup or failure does not hold back the window.
+        const opening = openInitialWindow()
+        void startBundledHost().catch((error: unknown) => {
+          console.error('desktop remote web: bundled Host unavailable', error)
+        })
+        await opening
+        return
+      }
+      await navigateMain(applicationUrl)
+      await startBundledHost()
       if (backend.host !== undefined) await openInitialWindow()
-      if (backend.host !== undefined) updateJournal?.action('workspace-ready')
       // The existing Web document resumes through the boot IPC response.
     })().catch((error: unknown) => {
       updateJournal?.action('workspace-failed')
