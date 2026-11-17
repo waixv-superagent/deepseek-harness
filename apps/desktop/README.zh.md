@@ -15,6 +15,7 @@ Desktop 在原生应用中运行 Harness 工作区。本参考文档说明应用
 - [应用概览](#application-overview)
 - [终端命令](#terminal-command)
 - [关闭窗口与退出](#closing-the-window-and-quitting)
+- [Host 生命周期与重新连接](#host-lifetime-and-reconnecting)
 - [关键技术决策](#key-technical-decisions)
 - [内置命令运行时](#bundled-command-runtime)
 - [安装归属](#installation-ownership)
@@ -35,7 +36,7 @@ Electron 在 `userData/desktop/locale-cache` 缓存最近确认的界面语言�
 
 桌面埋点遵循[产品采集策略](../../packages/client/product-analytics/README.zh.md)及其动态应用配置，不包含 Web 使用情况。安装更新会等待该操作的本地埋点接收请求结束，再锁定 API 准入并停止 Host。接收请求的时限为一秒，失败不会阻止安装，也不等待收集端完成发送。
 
-桌面应用是完整 dsh Web 应用外的一层 Electron 壳。Electron RunAsNode 子进程启动共享 profile runner，Electron 立即从 `dsh-app://app/` 加载打包内的 Web 入口。共享加载页等待 Host 启动注入，然后在同一文档中启动客户端。Electron 将应用 HTTP 请求转发给已认证的 Web Host，转发时丢弃描述 Node fetch 连接而非资源本身的响应头（`transfer-encoding`、`connection`、`keep-alive`），并把插件 bundle 响应标记为 `no-store`，因为其每次启动都变化的 revision 只会在 Chromium 磁盘缓存中累积；WebSocket 流连接到该 Host，仅为归属的应用窗口附加凭据。Node IPC 承载启动注入、就绪与关闭。Desktop 默认监听系统分配的端口，因此不会与 Web 的 `3080` 或系统保留端口冲突；可通过 `webserver.config.port` patch 覆盖。原生 Host 请求会显式发送当前 Host 的认证 Cookie，任何 Electron session 都不保存该 Cookie；每次启动 Host 时都会移除早期版本遗留在默认 session 中的 `dsh-auth-*` Cookie，因为 Cookie 不区分端口，否则这些 Cookie 会随每个发往 `127.0.0.1` 的请求一并发送。
+桌面应用是完整 dsh Web 应用外的一层 Electron 壳。Electron RunAsNode 子进程启动共享 profile runner，Electron 立即从 `dsh-app://app/` 加载打包内的 Web 入口。共享加载页等待 Host 启动注入，然后在同一文档中启动客户端。Electron 将应用 HTTP 请求转发给已认证的 Web Host，转发时丢弃描述 Node fetch 连接而非资源本身的响应头（`transfer-encoding`、`connection`、`keep-alive`），并把插件 bundle 响应标记为 `no-store`，因为其每次启动都变化的 revision 只会在 Chromium 磁盘缓存中累积；WebSocket 流连接到该 Host，仅为归属的应用窗口附加凭据。当前壳拥有的 Host 通过 Node IPC 承载启动注入、就绪与关闭。Host 同时作为独立服务进程启动，并写出仅本用户可读的发现记录和回环控制端点，让后续启动可以连接已脱离壳的 Host；见 [Host 生命周期与重新连接](#host-lifetime-and-reconnecting)。Desktop 默认监听系统分配的端口，因此不会与 Web 的 `3080` 或系统保留端口冲突；可通过 `webserver.config.port` patch 覆盖。原生 Host 请求会显式发送当前 Host 的认证 Cookie，任何 Electron session 都不保存该 Cookie；每次启动 Host 时都会移除早期版本遗留在默认 session 中的 `dsh-auth-*` Cookie，因为 Cookie 不区分端口，否则这些 Cookie 会随每个发往 `127.0.0.1` 的请求一并发送。
 
 Desktop 绑定 `127.0.0.1`，即 Electron 为就绪 URL 与 WebSocket 凭据过滤器拨号的地址。WebSocket 流按 Host 监听器使用 `ws:` 或 `wss:`；附加凭据要求 authority 与 scheme 均匹配。
 
@@ -73,13 +74,23 @@ macOS 安装会创建 `/usr/local/bin/dsh`；目录权限需要时，系统会�
 
 Windows 在整个运行期间常驻托盘图标。悬停提示为产品名，单击显示并聚焦窗口，右键菜单提供壳语言下的"打开 DeepSeek Harness"和"退出 DeepSeek Harness"。首次隐藏前复用更新弹窗，显示“正在运行的任务不会中断，可在系统托盘中重新打开窗口”和“确认”按钮。确认后隐藏窗口，并在 Electron userData 下写入 `background-close-confirmed`；Esc、关闭弹窗或加载失败均保持主窗口可见，不记录确认。重复关闭请求会聚焦已有壳弹窗。覆盖更新保留标记，卸载删除标记。旧的 `background-notice-shown` 标记不会跳过此确认。关闭窗口不发送系统通知。托盘位图是 `resources/tray-windows.ico`，由 `pnpm run render:tray-icon` 从 `resources/icon-windows.svg` 按 16、20、24、32、40、48、64 像素分别渲染，打包为 `resources/tray.ico`。macOS 不提供菜单栏图标。
 
-所有普通退出入口——⌘Q、应用菜单、Dock 菜单、Windows 托盘和标题栏"应用程序"菜单，以及关闭欢迎窗口引起的退出——都先向 Host 查询退出会中断什么。Host 通过私有 IPC 通道回答两项事实：与更新重启检查同一口径的运行中任务（运行中的 agent，包括子代理和等待审批的回合、排队消息、运行中或停止中的后台任务），以及本次运行中已加载会话里由 `workspace/session-activity` 的 `schedule` family 报告的已挂定时器的提醒。两项都没有时直接退出，不弹框。否则弹出一个没有父窗口的原生消息框——隐藏的窗口保持隐藏——标题为**退出 DeepSeek Harness？**，正文为三种本地化说明之一：正在运行的任务将会中断、应用关闭期间定时任务不会运行，或两者兼有。"退出"是默认按钮，Esc 等同"取消"；macOS 上"取消"在"退出"左侧，Windows 上"退出"在"取消"左侧，Windows 任务对话框显示应用图标且不跟随应用主题、始终为浅色。Host 尚未就绪或已失败时不可能有任务在跑，直接退出。查询失败或 Host 超过两秒截止时间未答复，按运行中任务处理。弹框打开期间，再次请求退出只会并入同一弹框而不叠加新弹框（macOS 上还会把它提到前面；Electron 不暴露 Windows 任务对话框的句柄）；任务开始或结束不会改变文案；点"退出"不再重新查询即停止应用；点"取消"不发生任何变化。取消由关闭欢迎窗口引起的退出时，欢迎窗口会重新显示。
+所有普通退出入口——⌘Q、应用菜单、Dock 菜单、Windows 托盘和标题栏"应用程序"菜单，以及关闭欢迎窗口引起的退出——都先向 Host 查询退出会中断什么。Host 通过私有 IPC 通道回答两项事实：与更新重启检查同一口径的运行中任务（运行中的 agent，包括子代理和等待审批的回合、排队消息、运行中或停止中的后台任务），以及本次运行中已加载会话里由 `workspace/session-activity` 的 `schedule` family 报告的已挂定时器的提醒。只要 Host 已就绪就一定会弹框，因为弹框中的**同时停止 Host**复选框决定这个独立运行的 Host 是否随 App 一起结束；默认勾选。弹出一个没有父窗口的原生消息框——隐藏的窗口保持隐藏——标题为**退出 DeepSeek Harness？**，正文为三种本地化说明之一：正在运行的任务将会中断、应用关闭期间定时任务不会运行，或两者兼有；没有任务时显示 Host 正在运行的说明。取消勾选时只关闭 App，Host 继续在后台运行，下次启动可以连接。\"退出\"是默认按钮，Esc 等同\"取消\"；macOS 上\"取消\"在\"退出\"左侧，Windows 上\"退出\"在\"取消\"左侧，Windows 任务对话框显示应用图标且不跟随应用主题、始终为浅色。Host 尚未就绪或已失败时不可能有任务在跑，直接退出。查询失败或 Host 超过两秒截止时间未答复，按运行中任务处理。弹框打开期间，再次请求退出只会并入同一弹框而不叠加新弹框（macOS 上还会把它提到前面；Electron 不暴露 Windows 任务对话框的句柄）；任务开始或结束不会改变文案；点\"退出\"不再重新查询即执行所选生命周期；点\"取消\"不发生任何变化。取消由关闭欢迎窗口引起的退出时，欢迎窗口会重新显示。清理开始前，壳把主窗口矩形、是否停止 Host 以及退出前的检查结果写入 `userData/desktop/lifecycle.json`；下次启动恢复窗口矩形，启动界面会说明上次停止时中断了什么。
 
 强制更新的安装确认在 Windows 上额外显示等待提示，macOS 只显示简短的重启说明。
 
 以下情况跳过确认：安装更新的重启已确认过任务中断、致命错误恢复对话框中的退出或重启、开发版"重启应用与 Host"命令，以及操作系统关机、重启或注销：Windows 在确定性的会话结束消息上设置该状态；macOS 在关机通知上设置，而其他应用仍可能取消这次关机，因此主窗口下一次获得焦点或显示时会清除它。安装器接管退出时会取消尚未结束的普通退出决策；晚到的查询结果和弹框答复不会再次打开确认框或重复清理。窗口隐藏期间完成的用户主动发起的更新下载，把"安装并重启"确认推迟到窗口再次显示时；强制更新流程沿用其任务栏和 Dock 提醒。Windows 安装程序和卸载程序在应用仍在运行时提示用户先在系统托盘中退出。Desktop 默认未开启定时任务，定时任务的说明只在该功能开启后出现；提醒只在已加载的会话中触发，未加载的会话既不计入，也要等到打开后才会继续。
 
 托盘渲染器以底板中心为基准将鲸鱼放大 20%，保留背景和宽高比；应用和安装器图标保持原有比例。
+
+<a id="host-lifetime-and-reconnecting"></a>
+
+## Host 生命周期与重新连接
+
+壳把 Host 作为独立服务进程启动。Host 就绪后，以原子写入和仅本用户可读的权限写出 `userData/desktop/host.json`：pid、已认证的启动 URL、boot injections、启动时间、它占用的 profile 与运行时目录，以及回环控制端点的端口和 bearer token。Host 的日志写到 `userData/desktop/host.log`，因为它从壳继承的管道会随壳退出而关闭。Host 正常关闭时删除发现记录；无法启动时写出 `host.json.error`，让下一次启动能解释失败原因。
+
+每次启动都先探测该记录，再决定是否拉起 Host。一个能通过认证控制端点回答、属于同一 profile、同一应用构建的 Host 会出现在启动窗口里；否则启动窗口显示启动进度并继续自动拉起。窗口在工作区之前显示，决策期间不能被关闭：Enter 或 Escape 执行主操作。**连接到这个 Host** 会保留它的会话和运行中任务；**停止并重新拉起 Host** 会先请求它优雅退出，再启动新的 Host。记录属于其他构建、其他 profile 或进程无响应时，只提供重新拉起。窗口会说明是否有任务在运行，并重复上次退出停止的内容。它的渲染进程与 Welcome 一样隔离：私有 preload 只暴露当前展示和所选操作，任何 Host 凭证都不会进入窗口。
+
+连接后的 Host 通过认证控制端点提供与自有 IPC 通道相同的事实：退出前检查、更新准入与任务检查、会话级文件拖拽授权、优雅关闭，以及供内嵌 Platform 视图使用的最新凭证快照（壳会轮询该快照）。端点只绑定 `127.0.0.1`，要求把发现文件中的 token 作为 bearer 凭证，且从不携带 Host 认证 cookie。覆盖更新仍然先停止 Host 再安装；连接状态下的 Host 若在截止时间内未完成任务清理，会被终止并拒绝安装，与自有子进程一致。发现记录已不响应、但其进程仍占着 profile 时，既无法连接也无法自动替换；此时拉起新 Host 会由正常的致命错误恢复到 profile 或地址冲突的提示。
 
 <a id="key-technical-decisions"></a>
 

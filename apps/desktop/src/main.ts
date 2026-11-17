@@ -6,6 +6,7 @@ import type { DesktopChannelState, DesktopChannelChangeResult } from '@deepseek-
 import { DesktopUpdateSettings } from './update-settings.ts'
 import { isDesktopUpdateChannel } from './settings-file.ts'
 import type { ProductEventMap, ProductEvent } from '@deepseek-ai/dsh-client-product-analytics/types'
+import type { PlatformSession } from '@deepseek-ai/dsh-deepseek-account'
 import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 import { access, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ import {
   nativeImage,
   nativeTheme,
   protocol,
+  screen,
   session,
   shell,
   type IpcMainInvokeEvent,
@@ -28,7 +30,18 @@ import {
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
 import { DesktopProjectManager } from './project-manager.ts'
-import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
+import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError, type DesktopQuitInspection } from './host-process.ts'
+import { DesktopServiceHost } from './host-service.ts'
+import {
+  desktopHostDiscoveryPath, desktopHostLogPath, inspectDiscoveredHost, probeDesktopHost, readDesktopHostDiscovery,
+  stopDiscoveredHost, type DesktopHostDiscovery,
+} from './host-discovery.ts'
+import { DesktopLifecycleWindow } from './lifecycle-window.ts'
+import type { LifecycleChoice, LifecycleState } from './lifecycle-ipc.ts'
+import {
+  LIFECYCLE_STATE_VERSION, lifecycleStatePath, readLifecycleState, restoreLifecycleBounds, writeLifecycleState,
+  type LifecycleWindowBounds,
+} from './lifecycle-state.ts'
 import { DesktopPlatformView, PLATFORM_IPC, platformBounds } from './platform-view.ts'
 import { installDesktopFileDrag } from './file-drag.ts'
 import { installDesktopDirectoryPicker } from './directory-picker.ts'
@@ -88,6 +101,9 @@ let windowsLanguage: string | undefined = readDesktopLocaleCache(app.getPath('us
 let backendReady = false
 /** Error-level console output of the primary window, attached to crash reports. */
 const rendererConsole = new RendererConsoleTail()
+
+/** The Host this launch uses: attach to one that outlived its shell, or spawn a new one. */
+type DesktopHostPlan = { readonly kind: 'spawn' } | { readonly kind: 'attach'; readonly discovery: DesktopHostDiscovery }
 
 // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
 // set before ready so the first fatal report already resolves under it.
@@ -259,12 +275,21 @@ function platformLoginUrl(authorizeUrl: string): string {
   return url.href
 }
 
+/** Window rectangle saved by the last quit; the next primary window opens where the person left it. */
+let restoredMainWindowBounds: LifecycleWindowBounds | undefined
+
 function createWindow(preload: string, show = false, primary = false): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 520,
     minHeight: 600,
+    ...(primary && restoredMainWindowBounds !== undefined
+      ? {
+        x: restoredMainWindowBounds.x, y: restoredMainWindowBounds.y,
+        width: restoredMainWindowBounds.width, height: restoredMainWindowBounds.height,
+      }
+      : {}),
     show,
     ...(process.platform === 'win32' && primary ? {
       titleBarStyle: 'hidden' as const,
@@ -292,6 +317,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
       devTools: true,
     },
   })
+  if (primary && restoredMainWindowBounds?.maximized === true) window.maximize()
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
     return { action: 'deny' }
@@ -370,6 +396,15 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
 
 async function main(): Promise<void> {
   const desktopSettings = await readDesktopSettings(app.getPath('userData'))
+  const userData = app.getPath('userData')
+  const hostDiscoveryPath = desktopHostDiscoveryPath(userData)
+  const hostLogPath = desktopHostLogPath(userData)
+  const restorePath = lifecycleStatePath(userData)
+  const lastLifecycle = readLifecycleState(restorePath)
+  restoredMainWindowBounds = restoreLifecycleBounds(lastLifecycle?.window, screen.getAllDisplays().map(display => display.workArea))
+  let nextHostPlan: DesktopHostPlan | undefined
+  let launchWindow: DesktopLifecycleWindow | undefined
+  let stopPlatformSessionPoll: (() => void) | undefined
   void pruneCrashReports(app.getPath('logs'))
   const journalDirectory = process.env.DSH_DESKTOP_UPDATE_JOURNAL_DIR
   const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
@@ -522,16 +557,20 @@ async function main(): Promise<void> {
     () => locale.id === 'zh-CN' ? 'zh_CN' : 'en_US', process.platform === 'win32' ? 'win32' : 'darwin',
     owner => isMandatory() || updateOverlays.input(owner).blocked)
   const backend = new DesktopBackendController((onFailure) => {
+    const plan = nextHostPlan
+    nextHostPlan = undefined
     const hostInspectPort = developmentHostInspectPort(development)
-    const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
-      hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
-      primaryRuntime,
-      resources, (next) => { platformView.setSession(next) }, (record) => {
-        operationJournal ??= new OperationJournal(join(app.getPath('userData'), 'plugin-operations'), {
-          segmentBytes: 256 * 1024, recordBytes: 4096, queuedBytes: 64 * 1024,
-        })
-        operationJournal.enqueue(JSON.stringify(record))
-      })
+    const host = plan?.kind === 'attach'
+      ? new DesktopServiceHost(plan.discovery)
+      : new DesktopHostProcess(resources.node, resources.dsh, activeProject,
+        hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
+        primaryRuntime,
+        resources, (next) => { platformView.setSession(next) }, (record) => {
+          operationJournal ??= new OperationJournal(join(app.getPath('userData'), 'plugin-operations'), {
+            segmentBytes: 256 * 1024, recordBytes: 4096, queuedBytes: 64 * 1024,
+          })
+          operationJournal.enqueue(JSON.stringify(record))
+        }, { discoveryPath: hostDiscoveryPath, logPath: hostLogPath })
     return {
       start: async () => {
         const ready = await host.start()
@@ -542,6 +581,21 @@ async function main(): Promise<void> {
           .catch((error: unknown) => { console.error('desktop: legacy Host cookie cleanup failed', error) })
         if (ready.injections === undefined) throw new Error('Desktop Host did not provide boot injections')
         injections = ready.injections
+        void launchWindow?.close().catch((error: unknown) => { console.error('desktop lifecycle: could not close the launch window', error) })
+        if (host instanceof DesktopServiceHost) {
+          // Embedded Platform views need the credential snapshot the owned Host used to push over
+          // IPC; an attached Host answers the same facts over its control endpoint.
+          stopPlatformSessionPoll?.()
+          const readPlatform = (): void => {
+            void host.platformSession().then((session) => {
+              if (!quitting) platformView.setSession(session as PlatformSession | null)
+            }, () => undefined)
+          }
+          readPlatform()
+          const poll = setInterval(readPlatform, 30_000)
+          poll.unref()
+          stopPlatformSessionPoll = () => { clearInterval(poll) }
+        }
         welcomeBackend = connectDesktopWelcome(ready.url, cookie)
         analyticsEnabled = await welcomeBackend.analyticsEnabled().catch(() => false)
         if (!reportedLaunch) { reportedLaunch = true; void track('desktop_app_launch', {}) }
@@ -587,6 +641,8 @@ async function main(): Promise<void> {
       stop: async () => {
         analyticsEnabled = false
         stopAccount?.()
+        stopPlatformSessionPoll?.()
+        stopPlatformSessionPoll = undefined
         try { await host.stop(requireCleanStop) }
         catch (error) {
           if (!requireCleanStop || !(error instanceof DesktopHostUncleanExitError)) throw error
@@ -1416,6 +1472,96 @@ async function main(): Promise<void> {
       await enterWorkspace()
     }
   }
+  /** What the last exit stopped, shown under the launch options. */
+  const launchFootnote = (): string | undefined => {
+    if (lastLifecycle?.stopHost !== true) return undefined
+    const lines = [locale.messages.lifecycleLastStopped]
+    if (lastLifecycle.interrupted?.activeTasks === true) lines.push(locale.messages.lifecycleLastInterrupted)
+    return lines.join(' ')
+  }
+  const startingLaunchState = (footnote: string | undefined): LifecycleState => ({
+    phase: 'starting', title: locale.messages.lifecycleStartingTitle, detail: locale.messages.lifecycleStartingDetail,
+    ...(footnote === undefined ? {} : { footnote }),
+  })
+  /**
+   * Decide this launch's Host before the backend starts: attach to one that outlived its shell,
+   * stop and replace it, or spawn a new one. Without a discovery record the launch proceeds as
+   * before; the window asks only when a Host exists to connect to or replace.
+   */
+  const resolveLaunchPlan = async (): Promise<void> => {
+    const discovery = await readDesktopHostDiscovery(hostDiscoveryPath)
+    if (discovery === undefined) {
+      nextHostPlan = { kind: 'spawn' }
+      return
+    }
+    const probe = await probeDesktopHost(discovery, {
+      projectDir: activeProject, runtimeDir: resources.dsh, clientVersion: desktopClientVersion(),
+    })
+    if (!probe.live && probe.reason === 'dead') {
+      // A crashed Host left a record behind; a fresh Host overwrites it once ready.
+      nextHostPlan = { kind: 'spawn' }
+      return
+    }
+    const footnote = launchFootnote()
+    const window = launchWindow ??= new DesktopLifecycleWindow(fileURLToPath(new URL('./preload-lifecycle.cjs', import.meta.url)))
+    try {
+      await window.open({
+        phase: 'searching', title: locale.messages.lifecycleSearchingTitle, detail: locale.messages.lifecycleSearchingDetail,
+        ...(footnote === undefined ? {} : { footnote }),
+      })
+    } catch (error) {
+      console.error('desktop lifecycle: could not open the launch window', error)
+      nextHostPlan = { kind: 'spawn' }
+      return
+    }
+    if (!probe.live) {
+      // A record we may not attach to still names a process that can hold the profile; offer the
+      // restart that replaces it, and fall through to a fresh Host even if it cannot be stopped.
+      const recorded = probe.discovery
+      if (recorded === undefined) {
+        window.update(startingLaunchState(footnote))
+        nextHostPlan = { kind: 'spawn' }
+        return
+      }
+      const stale = probe.reason !== 'unreachable'
+      window.update({
+        phase: 'stale',
+        title: stale ? locale.messages.lifecycleStaleTitle : locale.messages.lifecycleErrorTitle,
+        detail: stale ? locale.messages.lifecycleStaleDetail : locale.messages.lifecycleErrorDetail,
+        primary: { choice: 'restart', label: locale.messages.lifecycleRestart, hint: locale.messages.lifecycleRestartHint },
+        ...(footnote === undefined ? {} : { footnote }),
+      })
+      try { await window.choose() } catch { /* The window's default is the restart below. */ }
+      window.update(startingLaunchState(footnote))
+      await stopDiscoveredHost(recorded).catch((error: unknown) => {
+        console.error('desktop lifecycle: could not stop the previous Host', error)
+      })
+      nextHostPlan = { kind: 'spawn' }
+      return
+    }
+    const inspection = await inspectDiscoveredHost(probe.discovery).catch(() => undefined)
+    const tasks = inspection?.activeTasks === true ? locale.messages.lifecycleFoundTasks : locale.messages.lifecycleFoundIdle
+    const time = new Date(probe.discovery.startedAt).toLocaleTimeString(locale.id, { hour: '2-digit', minute: '2-digit' })
+    window.update({
+      phase: 'found',
+      title: locale.messages.lifecycleFoundTitle,
+      detail: formatDesktopMessage(locale.messages.lifecycleFoundDetail, { time, tasks }),
+      primary: { choice: 'connect', label: locale.messages.lifecycleConnect, hint: locale.messages.lifecycleConnectHint },
+      secondary: { choice: 'restart', label: locale.messages.lifecycleRestart, hint: locale.messages.lifecycleRestartHint },
+      ...(footnote === undefined ? {} : { footnote }),
+    })
+    let choice: LifecycleChoice = 'connect'
+    try { choice = await window.choose() } catch { /* Keep the default connect. */ }
+    window.update(startingLaunchState(footnote))
+    if (choice === 'restart') {
+      await stopDiscoveredHost(probe.discovery).catch((error: unknown) => {
+        console.error('desktop lifecycle: could not stop the running Host', error)
+      })
+      nextHostPlan = { kind: 'spawn' }
+      return
+    }
+    nextHostPlan = { kind: 'attach', discovery: probe.discovery }
+  }
   focusPrimaryWindow = () => {
     if (quitting) return
     if (isMandatory()) { mandatoryUI?.focus(); return }
@@ -1445,9 +1591,32 @@ async function main(): Promise<void> {
     if (process.platform !== 'darwin') app.quit()
   })
   if (process.platform !== 'win32') powerMonitor.on('shutdown', () => { sessionEnding = true })
-  const finishQuit = (): void => {
+  /** Capture the main window rectangle for the restore record; a destroyed window records nothing. */
+  const captureMainWindow = (): LifecycleWindowBounds | null => {
+    const window = mainWindow
+    if (window === undefined || window.isDestroyed()) return null
+    const bounds = window.getBounds()
+    return {
+      x: Math.round(bounds.x), y: Math.round(bounds.y),
+      width: Math.round(bounds.width), height: Math.round(bounds.height),
+      maximized: window.isMaximized(),
+    }
+  }
+  const finishQuit = (stopHost = true, inspection: DesktopQuitInspection | 'unknown' = 'unknown'): void => {
     quitting = true
     shuttingDown = true
+    stopPlatformSessionPoll?.()
+    stopPlatformSessionPoll = undefined
+    void launchWindow?.close().catch(() => undefined)
+    try {
+      writeLifecycleState(restorePath, {
+        version: LIFECYCLE_STATE_VERSION,
+        quitAt: new Date().toISOString(),
+        stopHost,
+        interrupted: inspection === 'unknown' ? null : inspection,
+        window: captureMainWindow(),
+      })
+    } catch (error) { console.error('desktop lifecycle: could not write the restore record', error) }
     updateJournal?.action('quit-requested')
     quitConfirmation.dispose()
     backgroundNotice?.dispose()
@@ -1458,11 +1627,13 @@ async function main(): Promise<void> {
     updateSchedule.dispose()
     updateDialog.dispose()
     mandatoryUI?.dispose()
+    // Unchecking the quit box leaves a detached Host running; only the shell's own cleanup remains.
+    const drainJournal = async (): Promise<void> => { await operationJournal?.drain(500) }
+    const backendCleanup = stopHost
+      ? backend.close().then(drainJournal, async (error: unknown) => { await drainJournal(); throw error })
+      : drainJournal()
     void Promise.all([stopOperationReports(), Promise.resolve(mandatoryPolicy?.dispose()).then(() => policyAuth?.dispose()),
-      backend.close().then(async () => { await operationJournal?.drain(500) }, async (error: unknown) => {
-        await operationJournal?.drain(500)
-        throw error
-      }),
+      backendCleanup,
       platformView.dispose(),
       disposeFileDrag(),
     ].map(cleanup => cleanup.catch((error: unknown) => { console.error(error) })))
@@ -1484,9 +1655,9 @@ async function main(): Promise<void> {
     if (quitting) return
     event.preventDefault()
     if (skipQuitConfirmation || sessionEnding) { finishQuit(); return }
-    void quitConfirmation.confirm().then((approved) => {
+    void quitConfirmation.confirm().then((decision) => {
       if (quitting || shellInstallerOwnsQuit) return
-      if (approved) { finishQuit(); return }
+      if (decision !== false) { finishQuit(decision.stopHost, decision.inspection); return }
       // A quit that started from closing the welcome window destroyed it; a cancelled quit needs it back.
       if (!enteredWorkspace && !recovery.active) void showWelcome().catch((error: unknown) => { reportFatal(error, 'main') })
     }).catch((error: unknown) => { console.error(error); if (!quitting && !shellInstallerOwnsQuit) finishQuit() })
@@ -1538,7 +1709,9 @@ async function main(): Promise<void> {
     }).catch((error: unknown) => { console.error(error) })
   }
   automaticCheck()
+  await resolveLaunchPlan()
   await reconcileBackend().catch(() => undefined)
+  await launchWindow?.close().catch(() => undefined)
   // Window lifecycle callbacks run while backend startup is pending.
   if (isQuitting()) return
   const window = currentMainWindow()

@@ -18,10 +18,25 @@ import { installDesktopQuitInspection } from './quit-inspection.ts'
 import { installPlatformSessionPublisher } from './platform-session.ts'
 import { installOfficeEngineResolution } from './office-engine.ts'
 import { installOperationDiagnostics } from './operation-diagnostics.ts'
+import { startDesktopControlServer, type DesktopControlServer } from './service-control.ts'
+import {
+  DESKTOP_HOST_DISCOVERY_VERSION, removeDesktopHostDiscovery, removeDesktopHostFailure,
+  writeDesktopHostDiscovery, writeDesktopHostFailure,
+} from './discovery.ts'
+import type { PlatformSession } from '@deepseek-ai/dsh-deepseek-account'
+
+/**
+ * Absolute discovery path supplied by an owning Desktop shell. Its presence means this Host must
+ * survive that shell: the shell may exit while tasks continue, and a later shell attaches over the
+ * control endpoint instead of owning this process.
+ */
+const discoveryPath = process.env.DSH_DESKTOP_DISCOVERY
+const serviceMode = discoveryPath !== undefined && discoveryPath !== ''
 
 async function main(): Promise<void> {
   const runId = randomUUID() as PluginOperationRunId
   if (process.connected) process.send?.({ type: 'starting', runId }, (error) => { if (error !== null) console.error(error) })
+  if (serviceMode) await removeDesktopHostFailure(discoveryPath)
   const runtimeDir = process.argv[2] as string
   const projectDir = process.argv[3] as string
   installOfficeEngineResolution(runtimeDir)
@@ -57,7 +72,13 @@ async function main(): Promise<void> {
     if (!process.connected || process.send === undefined) { resolve(); return }
     process.send(message, (error) => { if (error === null) resolve(); else reject(error) })
   })
+  let controlServer: DesktopControlServer | undefined
+  let platformSession: PlatformSession | null = null
   const stop = (): Promise<void> => stopping ??= (async () => {
+    if (serviceMode) await removeDesktopHostDiscovery(discoveryPath).catch(() => undefined)
+    // The shutdown answer has already been written; the process exit below closes the socket, and
+    // awaiting a keep-alive peer here would delay task teardown.
+    void controlServer?.close().catch(() => undefined)
     for (const abort of dragReads.values()) abort.abort()
     await Promise.allSettled(dragTasks)
     // Startup failure is reported by main; shutdown only owns a tree that booted.
@@ -126,7 +147,9 @@ async function main(): Promise<void> {
       }
     })().catch((error: unknown) => { console.error(error) })
   })
-  process.once('disconnect', () => { void stop() })
+  // A service Host outlives its owning shell: the closed IPC channel means the shell quit while
+  // tasks continue, and a later shell attaches over the control endpoint.
+  process.once('disconnect', () => { if (!serviceMode) void stop() })
   const { ctx } = await application
   installOperationDiagnostics(ctx, record => send({ type: 'plugin-operation', record }), 32, runId)
   control.updateTasks = installDesktopUpdateTaskControl(ctx)
@@ -137,19 +160,54 @@ async function main(): Promise<void> {
     root: join(resolveDshHome(), 'dsh-runtimes', 'dsh-primary-runtime'),
   })
   installPlatformSessionPublisher(ctx, (session) => {
+    platformSession = session
     if (process.connected) process.send?.({ type: 'platform-session', session })
   })
   const url = ctx.connection.authenticatedUrl(`${ctx.webServer.protocol}//127.0.0.1:${String(ctx.webServer.port)}`)
-  if (process.connected) process.send?.({ type: 'ready', url, injections: ctx.webServer.collectIndexInjections(ctx.connection.browserPeer) }, (error) => { if (error !== null) console.error(error) })
+  const injections = ctx.webServer.collectIndexInjections(ctx.connection.browserPeer)
+  if (serviceMode) {
+    controlServer = await startDesktopControlServer({
+      inspect: async () => {
+        if (control.quitInspection === undefined) throw new Error('desktop quit: Host is unavailable')
+        return control.quitInspection()
+      },
+      updateTasks: async (action) => {
+        if (control.updateTasks === undefined) throw new Error('desktop update: Host is unavailable')
+        return control.updateTasks(action)
+      },
+      dragResource: async (address, signal) => {
+        if (stopping !== undefined) throw new Error('Host stopping')
+        return localDragResource(ctx, address, signal)
+      },
+      platformSession: () => platformSession,
+      shutdown: () => { void stop() },
+    })
+    await writeDesktopHostDiscovery(discoveryPath, {
+      version: DESKTOP_HOST_DISCOVERY_VERSION,
+      pid: process.pid,
+      url,
+      injections,
+      startedAt: new Date().toISOString(),
+      control: { port: controlServer.port, token: controlServer.token },
+      projectDir,
+      runtimeDir,
+      clientVersion: process.env.DSH_CLIENT_VERSION ?? '',
+    })
+  }
+  if (process.connected) process.send?.({ type: 'ready', url, injections }, (error) => { if (error !== null) console.error(error) })
 }
 
 if (import.meta.main) {
-  main().catch((error: unknown) => {
+  main().catch(async (error: unknown) => {
     const message = error instanceof Error ? error.message : String(error)
     // The shell receives the complete inspected error here, not through stderr:
     // stderr bytes and this IPC message race, and the shell reports the first
     // failure it sees.
     const diagnostic = formatFatalDiagnostic(error)
+    if (serviceMode) {
+      await removeDesktopHostDiscovery(discoveryPath).catch(() => undefined)
+      await writeDesktopHostFailure(discoveryPath, message, diagnostic)
+    }
     if (process.connected) process.send?.({ type: 'fatal', message, diagnostic }, (error) => { if (error !== null) console.error(error) })
     console.error(error)
     process.exitCode = 1

@@ -8,14 +8,17 @@ afterEach(() => { vi.restoreAllMocks() })
 
 function setup(platform: NodeJS.Platform, inspect: () => Promise<DesktopQuitInspection> | undefined, locale = 'zh') {
   const shown: MessageBoxOptions[] = []
-  let answer: MessageBoxReturnValue = { response: 0, checkboxChecked: false }
+  let answer: MessageBoxReturnValue = { response: 0, checkboxChecked: true }
   const focus = vi.fn()
   const icon: NativeImage = { isEmpty: () => false } as never
   const confirmation = new DesktopQuitConfirmation({
     locale: () => resolveDesktopLocale(locale), inspect, focus, platform, icon,
     show: async (options) => { shown.push(options); return answer },
   })
-  return { confirmation, shown, focus, icon, answer: (value: number) => { answer = { response: value, checkboxChecked: false } } }
+  return {
+    confirmation, shown, focus, icon,
+    answer: (value: number, checkboxChecked = true) => { answer = { response: value, checkboxChecked } },
+  }
 }
 
 describe('quit prompt selection', () => {
@@ -31,20 +34,33 @@ describe('quit prompt selection', () => {
 })
 
 describe('DesktopQuitConfirmation', () => {
-  it('quits silently when nothing is running and no Host is ready', async () => {
-    const idle = setup('darwin', async () => ({ activeTasks: false, scheduledTasks: false }))
-    expect(await idle.confirmation.confirm()).toBe(true)
+  it('quits without a box only when no Host is ready', async () => {
     const starting = setup('darwin', () => undefined)
-    expect(await starting.confirmation.confirm()).toBe(true)
-    expect([...idle.shown, ...starting.shown]).toEqual([])
+    expect(await starting.confirmation.confirm()).toEqual({ stopHost: true, inspection: 'unknown' })
+    expect(starting.shown).toEqual([])
   })
 
-  it('shows the macOS alert with the warning icon, Chinese copy, and Quit as the default right-hand button', async () => {
+  it('asks even when nothing runs while a Host is ready, so the Host lifetime stays a choice', async () => {
+    const idle = setup('darwin', async () => ({ activeTasks: false, scheduledTasks: false }))
+    expect(await idle.confirmation.confirm()).toEqual({ stopHost: true, inspection: { activeTasks: false, scheduledTasks: false } })
+    expect(idle.shown).toHaveLength(1)
+    expect(idle.shown[0]?.detail).toBe('不勾选时只关闭 App，Host 会继续在后台运行，下次启动可直接连接。')
+    expect(idle.shown[0]?.checkboxLabel).toBe('同时停止 Host')
+  })
+
+  it('keeps the Host when the box is unchecked', async () => {
+    const f = setup('win32', async () => ({ activeTasks: true, scheduledTasks: false }))
+    f.answer(0, false)
+    expect(await f.confirmation.confirm()).toEqual({ stopHost: false, inspection: { activeTasks: true, scheduledTasks: false } })
+  })
+
+  it('shows the macOS alert with the warning icon, Chinese copy, the Host checkbox, and Quit as the default right-hand button', async () => {
     const f = setup('darwin', async () => ({ activeTasks: true, scheduledTasks: true }))
-    expect(await f.confirmation.confirm()).toBe(true)
+    expect(await f.confirmation.confirm()).toEqual({ stopHost: true, inspection: { activeTasks: true, scheduledTasks: true } })
     expect(f.shown).toEqual([{
       type: 'warning', title: 'DeepSeek Harness', message: '退出 DeepSeek Harness？',
-      detail: '当前正在运行的任务将会中断，且应用关闭期间，定时任务不会运行',
+      detail: '当前正在运行的任务将会中断，且应用关闭期间，定时任务不会运行\n不勾选时只关闭 App，Host 会继续在后台运行，下次启动可直接连接。',
+      checkboxLabel: '同时停止 Host', checkboxChecked: true,
       buttons: ['退出', '取消'], defaultId: 0, cancelId: 1, noLink: true,
     }])
   })
@@ -55,7 +71,8 @@ describe('DesktopQuitConfirmation', () => {
     expect(await f.confirmation.confirm()).toBe(false)
     expect(f.shown).toEqual([{
       type: 'none', icon: f.icon, title: 'DeepSeek Harness', message: 'Quit DeepSeek Harness?',
-      detail: 'Scheduled tasks will not run while the app is closed.',
+      detail: 'Scheduled tasks will not run while the app is closed.\nIf unchecked, the App closes and the Host keeps running; the next launch can connect to it.',
+      checkboxLabel: 'Also stop the Host', checkboxChecked: true,
       buttons: ['Quit', 'Cancel'], defaultId: 0, cancelId: 1, noLink: true,
     }])
   })
@@ -65,7 +82,9 @@ describe('DesktopQuitConfirmation', () => {
     const f = setup('darwin', async () => { throw new Error('desktop quit: inspection timed out') })
     f.answer(1)
     expect(await f.confirmation.confirm()).toBe(false)
-    expect(f.shown.map(options => options.detail)).toEqual(['当前正在运行的任务将会中断'])
+    expect(f.shown.map(options => options.detail)).toEqual([
+      '当前正在运行的任务将会中断\n不勾选时只关闭 App，Host 会继续在后台运行，下次启动可直接连接。',
+    ])
     expect(console.warn).toHaveBeenCalledWith('desktop quit: task inspection unavailable', expect.any(Error))
   })
 
@@ -79,7 +98,7 @@ describe('DesktopQuitConfirmation', () => {
     expect(f.focus).toHaveBeenCalledOnce()
     expect(inspect).toHaveBeenCalledOnce()
     inspected.resolve({ activeTasks: true, scheduledTasks: false })
-    expect(await first).toBe(true)
+    expect(await first).toEqual({ stopHost: true, inspection: { activeTasks: true, scheduledTasks: false } })
     expect(f.shown).toHaveLength(1)
     // The decision is closed: the next request starts a fresh inspection.
     expect(f.confirmation.confirm()).not.toBe(first)
@@ -107,7 +126,7 @@ describe('DesktopQuitConfirmation', () => {
     const pending = confirmation.confirm()
     await Promise.resolve()
     confirmation.dispose()
-    answered.resolve({ response: 0, checkboxChecked: false })
+    answered.resolve({ response: 0, checkboxChecked: true })
     expect(await pending).toBe(false)
   })
 })
