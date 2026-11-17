@@ -16,6 +16,7 @@ Desktop 在原生应用中运行 Harness 工作区。本参考文档说明应用
 - [终端命令](#terminal-command)
 - [关闭窗口与退出](#closing-the-window-and-quitting)
 - [Host 生命周期与重新连接](#host-lifetime-and-reconnecting)
+- [局域网远端 Host](#remote-hosts)
 - [显示远程 Web 主机](#displaying-a-remote-web-host)
 - [关键技术决策](#key-technical-decisions)
 - [内置命令运行时](#bundled-command-runtime)
@@ -92,6 +93,12 @@ Windows 在整个运行期间常驻托盘图标。悬停提示为产品名，单
 每次启动都先探测该记录，再决定是否拉起 Host。一个能通过认证控制端点回答、属于同一 profile、同一应用构建的 Host 会出现在启动窗口里；否则启动窗口显示启动进度并继续自动拉起。窗口在工作区之前显示，决策期间不能被关闭：Enter 或 Escape 执行主操作。**连接到这个 Host** 会保留它的会话和运行中任务；**停止并重新拉起 Host** 会先请求它优雅退出，再启动新的 Host。记录属于其他构建、其他 profile 或进程无响应时，只提供重新拉起。窗口会说明是否有任务在运行，并重复上次退出停止的内容。它的渲染进程与 Welcome 一样隔离：私有 preload 只暴露当前展示和所选操作，任何 Host 凭证都不会进入窗口。
 
 连接后的 Host 通过认证控制端点提供与自有 IPC 通道相同的事实：退出前检查、更新准入与任务检查、会话级文件拖拽授权、优雅关闭，以及供内嵌 Platform 视图使用的最新凭证快照（壳会轮询该快照）。端点只绑定 `127.0.0.1`，要求把发现文件中的 token 作为 bearer 凭证，且从不携带 Host 认证 cookie。覆盖更新仍然先停止 Host 再安装；连接状态下的 Host 若在截止时间内未完成任务清理，会被终止并拒绝安装，与自有子进程一致。发现记录已不响应、但其进程仍占着 profile 时，既无法连接也无法自动替换；此时拉起新 Host 会由正常的致命错误恢复到 profile 或地址冲突的提示。
+
+<a id="remote-hosts"></a>
+
+## 局域网远端 Host
+
+启动时也会查找局域网内由 Caddy 暴露的 Host。扫描对每个本机 IPv4 接口所在 /24 的 9443 端口，以及 `userData/desktop/remote.json` 里的上次地址，发送不带凭据、不校验证书的探测；远端以网关的 `401` 和 `WWW-Authenticate: Basic realm="dsh"` 应答。启动窗口把这些结果与本地 Host 选项并列展示，并提供手动地址输入，接受网关打印的任意 http(s) 地址。选择远端地址时不启动本地 Host：一个不带应用 preload 的普通窗口加载该地址，首次向网关询问 Basic 账号密码（仅保存在本次运行内存中），`dsh_session` cookie 和地址携带的 Host token 负责后续页面认证；退出只关闭该窗口。系统必须信任网关的私有 CA，未受信任的证书会被拒绝而不是忽略。该窗口不提供拖拽授权、Platform 会话、Host 任务检查和 App 内更新。壳把上次地址保存在 `remote.json`，密码从不写盘。`DSH_DESKTOP_REMOTE_DISCOVERY=0` 关闭扫描，`1` 强制开启；默认在打包应用或 `DSH_DESKTOP_DEV_APP=1` 的开发运行中开启。
 
 <a id="displaying-a-remote-web-host"></a>
 

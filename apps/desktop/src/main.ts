@@ -35,10 +35,14 @@ import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError,
 import { DesktopServiceHost } from './host-service.ts'
 import {
   desktopHostDiscoveryPath, desktopHostLogPath, inspectDiscoveredHost, probeDesktopHost, readDesktopHostDiscovery,
-  stopDiscoveredHost, type DesktopHostDiscovery,
+  stopDiscoveredHost, type DesktopHostDiscovery, type DesktopHostProbe,
 } from './host-discovery.ts'
+import {
+  normalizeRemoteUrl, readRemoteEndpoint, remoteEndpointPath, sameRemoteOrigin, writeRemoteEndpoint,
+} from './remote-endpoint.ts'
+import { discoverRemoteHosts, type DiscoveredRemoteHost } from './remote-discovery.ts'
 import { DesktopLifecycleWindow } from './lifecycle-window.ts'
-import type { LifecycleChoice, LifecycleState } from './lifecycle-ipc.ts'
+import type { LifecycleChoice, LifecycleFormCopy, LifecycleRemote, LifecycleState } from './lifecycle-ipc.ts'
 import {
   LIFECYCLE_STATE_VERSION, lifecycleStatePath, readLifecycleState, restoreLifecycleBounds, writeLifecycleState,
   type LifecycleWindowBounds,
@@ -103,8 +107,17 @@ let backendReady = false
 /** Error-level console output of the primary window, attached to crash reports. */
 const rendererConsole = new RendererConsoleTail()
 
-/** The Host this launch uses: attach to one that outlived its shell, or spawn a new one. */
-type DesktopHostPlan = { readonly kind: 'spawn' } | { readonly kind: 'attach'; readonly discovery: DesktopHostDiscovery }
+/** The Host this launch uses: attach to one that outlived its shell, spawn a new one, or use a remote one. */
+type DesktopHostPlan =
+  | { readonly kind: 'spawn' }
+  | { readonly kind: 'attach'; readonly discovery: DesktopHostDiscovery }
+  | {
+    readonly kind: 'remote'
+    readonly url: string
+    /** Gateway credentials typed in the launch window; they are never written to disk. */
+    readonly username?: string
+    readonly password?: string
+  }
 
 // Platform-conventional logs directory (macOS ~/Library/Logs/<name>, otherwise under userData);
 // set before ready so the first fatal report already resolves under it.
@@ -411,10 +424,22 @@ async function main(): Promise<void> {
   const hostDiscoveryPath = desktopHostDiscoveryPath(userData)
   const hostLogPath = desktopHostLogPath(userData)
   const restorePath = lifecycleStatePath(userData)
+  const remotePath = remoteEndpointPath(userData)
+  const rememberedRemote = readRemoteEndpoint(remotePath)?.url
   const lastLifecycle = readLifecycleState(restorePath)
   restoredMainWindowBounds = restoreLifecycleBounds(lastLifecycle?.window, screen.getAllDisplays().map(display => display.workArea))
   let nextHostPlan: DesktopHostPlan | undefined
   let launchWindow: DesktopLifecycleWindow | undefined
+  let remoteOrigin: string | undefined
+  let remoteScanAbort: AbortController | undefined
+  let remoteCertificateReported = false
+  let remoteLoginPrompt: Promise<void> | undefined
+  /** Gateway credentials typed in this run; never written to disk. */
+  const remoteCredentials = new Map<string, { readonly username: string; readonly password: string }>()
+  /** Last challenge time per origin, so an immediate repeat means the credentials were refused. */
+  const remoteLoginAt = new Map<string, number>()
+  /** Rejected attempts per origin, so a wrong password cannot prompt forever. */
+  const remoteLoginFailures = new Map<string, number>()
   let stopPlatformSessionPoll: (() => void) | undefined
   void pruneCrashReports(app.getPath('logs'))
   const journalDirectory = process.env.DSH_DESKTOP_UPDATE_JOURNAL_DIR
@@ -422,6 +447,10 @@ async function main(): Promise<void> {
   const resources = runtimeResources()
   const paths = resolveDesktopPaths()
   const development = !app.isPackaged
+  // Unit tests and unpackaged runs without the desktop flag keep the network untouched; a packaged
+  // application scans, and DSH_DESKTOP_REMOTE_DISCOVERY overrides both directions.
+  const remoteDiscoveryEnabled = process.env.DSH_DESKTOP_REMOTE_DISCOVERY === '1'
+    || (process.env.DSH_DESKTOP_REMOTE_DISCOVERY !== '0' && (app.isPackaged || process.env.DSH_DESKTOP_DEV_APP === '1'))
   const primaryRuntime = development
     ? developmentPrimaryRuntime()
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
@@ -527,6 +556,7 @@ async function main(): Promise<void> {
     show: ordinaryMessageBox,
   })
   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
+  const lifecyclePreload = fileURLToPath(new URL('./preload-lifecycle.cjs', import.meta.url))
   const applicationUrl = `${SCHEME}://app/`
   // A remote Web host serves its own pages and boot injections, so the application shell page and
   // its Host bridge apply only to the bundled Host.
@@ -578,6 +608,7 @@ async function main(): Promise<void> {
   const backend = new DesktopBackendController((onFailure) => {
     const plan = nextHostPlan
     nextHostPlan = undefined
+    if (plan?.kind === 'remote') throw new Error('desktop backend: a remote Host has no local child process')
     const hostInspectPort = developmentHostInspectPort(development)
     const host = plan?.kind === 'attach'
       ? new DesktopServiceHost(plan.discovery)
@@ -1530,89 +1561,411 @@ async function main(): Promise<void> {
     if (lastLifecycle.interrupted?.activeTasks === true) lines.push(locale.messages.lifecycleLastInterrupted)
     return lines.join(' ')
   }
-  const startingLaunchState = (footnote: string | undefined): LifecycleState => ({
-    phase: 'starting', title: locale.messages.lifecycleStartingTitle, detail: locale.messages.lifecycleStartingDetail,
-    ...(footnote === undefined ? {} : { footnote }),
+  /** Copy of the remote-address and credential forms, composed from the current locale. */
+  const lifecycleFormCopy = (): LifecycleFormCopy => ({
+    url: locale.messages.lifecycleRemoteUrl,
+    urlPlaceholder: locale.messages.lifecycleRemoteUrlPlaceholder,
+    username: locale.messages.lifecycleRemoteUsername,
+    password: locale.messages.lifecycleRemotePassword,
+    connect: locale.messages.lifecycleRemoteConnect,
+    back: locale.messages.lifecycleRemoteBack,
+    signIn: locale.messages.lifecycleRemoteSignIn,
+    cancel: locale.messages.lifecycleRemoteCancel,
+    invalidUrl: locale.messages.lifecycleRemoteInvalid,
   })
-  /**
-   * Decide this launch's Host before the backend starts: attach to one that outlived its shell,
-   * stop and replace it, or spawn a new one. Without a discovery record the launch proceeds as
-   * before; the window asks only when a Host exists to connect to or replace.
-   */
-  const resolveLaunchPlan = async (): Promise<void> => {
-    const discovery = await readDesktopHostDiscovery(hostDiscoveryPath)
-    if (discovery === undefined) {
-      nextHostPlan = { kind: 'spawn' }
-      return
+  /** Host:port of an address for display, or the text itself when it does not parse. */
+  const remoteHostLabel = (url: string): string => {
+    try { return new URL(url).host } catch { return url }
+  }
+  /** One card for a remote address; the remembered one says so. */
+  const remoteCard = (url: string, remembered: boolean): LifecycleRemote => ({
+    url,
+    label: formatDesktopMessage(remembered ? locale.messages.lifecycleRemoteRemembered : locale.messages.lifecycleRemoteFound,
+      { host: remoteHostLabel(url) }),
+  })
+  /** Remembered address first, then scanned gateways that name a different origin. */
+  const remoteCards = (hosts: readonly DiscoveredRemoteHost[]): LifecycleRemote[] => {
+    const cards: LifecycleRemote[] = []
+    if (rememberedRemote !== undefined) cards.push(remoteCard(rememberedRemote, true))
+    for (const host of hosts) {
+      if (rememberedRemote !== undefined && sameRemoteOrigin(rememberedRemote, host.url)) continue
+      cards.push(remoteCard(host.url, false))
     }
-    const probe = await probeDesktopHost(discovery, {
-      projectDir: activeProject, runtimeDir: resources.dsh, clientVersion: desktopClientVersion(),
-    })
-    if (!probe.live && probe.reason === 'dead') {
-      // A crashed Host left a record behind; a fresh Host overwrites it once ready.
-      nextHostPlan = { kind: 'spawn' }
-      return
-    }
-    const footnote = launchFootnote()
-    const window = launchWindow ??= new DesktopLifecycleWindow(fileURLToPath(new URL('./preload-lifecycle.cjs', import.meta.url)))
+    return cards
+  }
+  const openLaunchWindow = async (initial: LifecycleState): Promise<DesktopLifecycleWindow | undefined> => {
+    const window = launchWindow ??= new DesktopLifecycleWindow(lifecyclePreload)
     try {
-      await window.open({
-        phase: 'searching', title: locale.messages.lifecycleSearchingTitle, detail: locale.messages.lifecycleSearchingDetail,
-        ...(footnote === undefined ? {} : { footnote }),
-      })
+      await window.open(initial)
+      return window
     } catch (error) {
       console.error('desktop lifecycle: could not open the launch window', error)
-      nextHostPlan = { kind: 'spawn' }
-      return
+      return undefined
     }
-    if (!probe.live) {
-      // A record we may not attach to still names a process that can hold the profile; offer the
-      // restart that replaces it, and fall through to a fresh Host even if it cannot be stopped.
-      const recorded = probe.discovery
-      if (recorded === undefined) {
-        window.update(startingLaunchState(footnote))
+  }
+  /**
+   * Apply the launch window's answer. A remote address that does not parse keeps the form open with
+   * the error instead of silently falling back to a local Host.
+   */
+  const decideLaunchPlan = async (
+    window: DesktopLifecycleWindow,
+    liveProbe: DesktopHostProbe | undefined,
+    staleRecord: DesktopHostDiscovery | undefined,
+  ): Promise<void> => {
+    for (;;) {
+      let choice: LifecycleChoice
+      try {
+        choice = await window.choose()
+      } catch {
         nextHostPlan = { kind: 'spawn' }
         return
       }
-      const stale = probe.reason !== 'unreachable'
-      window.update({
-        phase: 'stale',
-        title: stale ? locale.messages.lifecycleStaleTitle : locale.messages.lifecycleErrorTitle,
-        detail: stale ? locale.messages.lifecycleStaleDetail : locale.messages.lifecycleErrorDetail,
-        primary: { choice: 'restart', label: locale.messages.lifecycleRestart, hint: locale.messages.lifecycleRestartHint },
-        ...(footnote === undefined ? {} : { footnote }),
-      })
-      try { await window.choose() } catch { /* The window's default is the restart below. */ }
-      window.update(startingLaunchState(footnote))
-      await stopDiscoveredHost(recorded).catch((error: unknown) => {
-        console.error('desktop lifecycle: could not stop the previous Host', error)
-      })
-      nextHostPlan = { kind: 'spawn' }
-      return
+      switch (choice.choice) {
+        case 'remote': {
+          const url = normalizeRemoteUrl(choice.url)
+          if (url === undefined) {
+            const current = window.state
+            if (current !== undefined) {
+              window.update({ ...current, phase: 'manual', error: locale.messages.lifecycleRemoteInvalid, remoteUrl: choice.url })
+            }
+            continue
+          }
+          try { writeRemoteEndpoint(remotePath, url) } catch (error) {
+            console.error('desktop lifecycle: could not remember the remote address', error)
+          }
+          nextHostPlan = {
+            kind: 'remote', url,
+            ...(choice.username === undefined ? {} : { username: choice.username }),
+            ...(choice.password === undefined ? {} : { password: choice.password }),
+          }
+          return
+        }
+        case 'connect':
+          nextHostPlan = liveProbe?.live === true ? { kind: 'attach', discovery: liveProbe.discovery } : { kind: 'spawn' }
+          return
+        case 'restart':
+          if (staleRecord !== undefined) {
+            await stopDiscoveredHost(staleRecord).catch((error: unknown) => {
+              console.error('desktop lifecycle: could not stop the previous Host', error)
+            })
+          }
+          nextHostPlan = { kind: 'spawn' }
+          return
+        case 'spawn':
+        case 'cancel':
+        case 'credentials':
+          nextHostPlan = { kind: 'spawn' }
+          return
+      }
     }
-    const inspection = await inspectDiscoveredHost(probe.discovery).catch(() => undefined)
-    const tasks = inspection?.activeTasks === true ? locale.messages.lifecycleFoundTasks : locale.messages.lifecycleFoundIdle
-    const time = new Date(probe.discovery.startedAt).toLocaleTimeString(locale.id, { hour: '2-digit', minute: '2-digit' })
-    window.update({
-      phase: 'found',
-      title: locale.messages.lifecycleFoundTitle,
-      detail: formatDesktopMessage(locale.messages.lifecycleFoundDetail, { time, tasks }),
-      primary: { choice: 'connect', label: locale.messages.lifecycleConnect, hint: locale.messages.lifecycleConnectHint },
-      secondary: { choice: 'restart', label: locale.messages.lifecycleRestart, hint: locale.messages.lifecycleRestartHint },
-      ...(footnote === undefined ? {} : { footnote }),
-    })
-    let choice: LifecycleChoice = 'connect'
-    try { choice = await window.choose() } catch { /* Keep the default connect. */ }
-    window.update(startingLaunchState(footnote))
-    if (choice === 'restart') {
-      await stopDiscoveredHost(probe.discovery).catch((error: unknown) => {
-        console.error('desktop lifecycle: could not stop the running Host', error)
-      })
-      nextHostPlan = { kind: 'spawn' }
-      return
-    }
-    nextHostPlan = { kind: 'attach', discovery: probe.discovery }
   }
+  /**
+   * Decide this launch's Host before the backend starts: attach to one that outlived its shell,
+   * stop and replace it, spawn a new one, or open a remote Host through this network's Caddy
+   * gateway. The window asks only when there is something to choose.
+   */
+  const resolveLaunchPlan = async (): Promise<void> => {
+    if (remoteWeb !== undefined) {
+      // The deployment configured the Host this window displays, and the merged remote-Web path
+      // starts the bundled Host behind it. Do not ask again (or scan a different network) here.
+      const discovery = await readDesktopHostDiscovery(hostDiscoveryPath)
+      const probe = discovery === undefined ? undefined : await probeDesktopHost(discovery, {
+        projectDir: activeProject, runtimeDir: resources.dsh, clientVersion: desktopClientVersion(),
+      })
+      nextHostPlan = probe?.live === true ? { kind: 'attach', discovery: probe.discovery } : { kind: 'spawn' }
+      return
+    }
+    // Start the network scan before the local record probe, so a remote Host answers while the
+    // loopback control port is still being checked.
+    remoteScanAbort?.abort()
+    remoteScanAbort = new AbortController()
+    const scan = remoteDiscoveryEnabled
+      ? discoverRemoteHosts({ seeds: rememberedRemote === undefined ? [] : [rememberedRemote], signal: remoteScanAbort.signal })
+        .catch((error: unknown) => {
+          console.error('desktop lifecycle: remote discovery failed', error)
+          return [] as readonly DiscoveredRemoteHost[]
+        })
+      : Promise.resolve([] as readonly DiscoveredRemoteHost[])
+    const discovery = await readDesktopHostDiscovery(hostDiscoveryPath)
+    const probe = discovery === undefined ? undefined : await probeDesktopHost(discovery, {
+      projectDir: activeProject, runtimeDir: resources.dsh, clientVersion: desktopClientVersion(),
+    })
+    const footnote = launchFootnote()
+    const form = lifecycleFormCopy()
+    const manual = { label: locale.messages.lifecycleRemoteManual }
+    const launchState = (base: LifecycleState, remotes: readonly LifecycleRemote[]): LifecycleState => ({
+      ...base,
+      form,
+      manual,
+      ...(rememberedRemote === undefined ? {} : { remoteUrl: rememberedRemote }),
+      ...(footnote === undefined ? {} : { footnote }),
+      remotes,
+    })
+    const open = async (
+      base: LifecycleState,
+      remotes: readonly LifecycleRemote[],
+      liveProbe?: DesktopHostProbe,
+      staleRecord?: DesktopHostDiscovery,
+    ): Promise<void> => {
+      const window = await openLaunchWindow(launchState(base, remotes))
+      if (window === undefined) {
+        nextHostPlan = { kind: 'spawn' }
+        return
+      }
+      if (remoteDiscoveryEnabled) {
+        void scan.then((hosts) => {
+          if (launchWindow !== window || window.state === undefined || window.state.closing === true) return
+          window.update({ ...window.state, remotes: remoteCards(hosts) })
+        })
+      }
+      await decideLaunchPlan(window, liveProbe, staleRecord)
+      remoteScanAbort?.abort()
+    }
+    if (probe?.live === true || (probe !== undefined && probe.reason !== 'dead') || rememberedRemote !== undefined) {
+      const initialRemotes = remoteCards([])
+      if (probe?.live === true) {
+        const inspection = await inspectDiscoveredHost(probe.discovery).catch(() => undefined)
+        const tasks = inspection?.activeTasks === true ? locale.messages.lifecycleFoundTasks : locale.messages.lifecycleFoundIdle
+        const time = new Date(probe.discovery.startedAt).toLocaleTimeString(locale.id, { hour: '2-digit', minute: '2-digit' })
+        await open({
+          phase: 'found',
+          title: locale.messages.lifecycleFoundTitle,
+          detail: formatDesktopMessage(locale.messages.lifecycleFoundDetail, { time, tasks }),
+          primary: { choice: { choice: 'connect' }, label: locale.messages.lifecycleConnect, hint: locale.messages.lifecycleConnectHint },
+          secondary: { choice: { choice: 'restart' }, label: locale.messages.lifecycleRestart, hint: locale.messages.lifecycleRestartHint },
+        }, initialRemotes, probe)
+        return
+      }
+      if (probe !== undefined && probe.reason !== 'dead') {
+        // A record we may not attach to still names a process that can hold the profile; offer the
+        // restart that replaces it, and fall through to a fresh Host even if it cannot be stopped.
+        const unreachable = probe.reason === 'unreachable'
+        await open({
+          phase: 'stale',
+          title: unreachable ? locale.messages.lifecycleErrorTitle : locale.messages.lifecycleStaleTitle,
+          detail: unreachable ? locale.messages.lifecycleErrorDetail : locale.messages.lifecycleStaleDetail,
+          primary: { choice: { choice: 'restart' }, label: locale.messages.lifecycleRestart, hint: locale.messages.lifecycleRestartHint },
+        }, initialRemotes, undefined, probe.discovery)
+        return
+      }
+      // Only a remembered remote is known; offer it while the scan looks for others.
+      await open({
+        phase: 'remote',
+        title: locale.messages.lifecycleRemoteTitle,
+        detail: locale.messages.lifecycleRemoteDetail,
+        secondary: { choice: { choice: 'spawn' }, label: locale.messages.lifecycleSpawnLocal },
+      }, initialRemotes)
+      return
+    }
+    const hosts = await scan
+    if (hosts.length === 0) {
+      // A crashed Host left a record behind, or nothing is running: a fresh Host overwrites it once ready.
+      nextHostPlan = { kind: 'spawn' }
+      return
+    }
+    await open({
+      phase: 'remote',
+      title: locale.messages.lifecycleRemoteTitle,
+      detail: locale.messages.lifecycleRemoteDetail,
+      secondary: { choice: { choice: 'spawn' }, label: locale.messages.lifecycleSpawnLocal },
+    }, remoteCards(hosts))
+  }
+  /**
+   * Ask for the Caddy gateway's HTTP credentials. The password stays in memory for this run; a
+   * rejected attempt reopens the same form with the reason instead of retrying silently.
+   */
+  const promptRemoteCredentials = async (
+    origin: string,
+    rejected: boolean,
+    suggestedUsername?: string,
+  ): Promise<{ readonly username: string; readonly password: string } | undefined> => {
+    const lifecycle = new DesktopLifecycleWindow(lifecyclePreload)
+    const suggested = suggestedUsername ?? remoteCredentials.get(origin)?.username
+    try {
+      await lifecycle.open({
+        phase: 'credentials',
+        title: locale.messages.lifecycleRemoteLoginTitle,
+        detail: formatDesktopMessage(locale.messages.lifecycleRemoteLoginDetail, { origin }),
+        credentials: {
+          origin,
+          ...(suggested === undefined ? {} : { username: suggested }),
+          ...(rejected ? { error: locale.messages.lifecycleRemoteLoginFailed } : {}),
+        },
+        form: lifecycleFormCopy(),
+      })
+      const choice = await lifecycle.choose()
+      return choice.choice === 'credentials' ? { username: choice.username, password: choice.password } : undefined
+    } catch (error) {
+      console.error('desktop lifecycle: could not open the credential window', error)
+      return undefined
+    } finally {
+      await lifecycle.close().catch(() => undefined)
+    }
+  }
+  /** Human-readable message of a thrown value. */
+  const describeError = (error: unknown): string => error instanceof Error ? error.message : String(error)
+  /** Chromium network error code of a thrown value, when it carries one. */
+  const errorCode = (error: unknown): string | undefined => typeof error === 'object' && error !== null
+    && 'code' in error && typeof error.code === 'string' ? error.code : undefined
+  /**
+   * Open the remote Host as this launch's workspace. The gateway owns authentication and the Host
+   * owns its sessions; this shell owns no child process, so quitting only closes this window.
+   */
+  const openRemoteWorkspace = async (plan: {
+    readonly url: string
+    readonly username?: string
+    readonly password?: string
+  }): Promise<void> => {
+    const url = normalizeRemoteUrl(plan.url)
+    if (url === undefined) {
+      console.error('desktop remote: refusing an invalid address', plan.url)
+      return
+    }
+    const origin = new URL(url).origin
+    remoteOrigin = origin
+    remoteCertificateReported = false
+    remoteLoginPrompt = undefined
+    remoteCredentials.clear()
+    remoteLoginAt.clear()
+    remoteLoginFailures.clear()
+    if (plan.username !== undefined && plan.password !== undefined) {
+      remoteCredentials.set(origin, { username: plan.username, password: plan.password })
+    }
+    try { writeRemoteEndpoint(remotePath, url) } catch (error) {
+      console.error('desktop remote: could not remember the address', error)
+    }
+    // The hidden window created at startup was only a dialog owner; remote mode replaces it with a
+    // window whose page comes from the remote Host and whose origin must not receive the app preload.
+    const placeholder = mainWindow
+    mainWindow = undefined
+    if (placeholder !== undefined && !placeholder.isDestroyed()) placeholder.destroy()
+    // The merged remote-Web window owns the native frame, external navigation and window-open rules;
+    // this path keeps its own Host-less lifecycle around the same window.
+    const window = createWindow(undefined, false, true)
+    mainWindow = window
+    enteredWorkspace = true
+    window.webContents.on('did-navigate', (_event, _url, httpResponseCode) => {
+      if (httpResponseCode >= 200 && httpResponseCode < 400) remoteLoginFailures.delete(origin)
+    })
+    window.webContents.on('did-fail-load', (_event, code, description, failedUrl, isMainFrame) => {
+      if (!isMainFrame || code === -3 || quitting || window.isDestroyed()) return
+      console.error('desktop remote: page failed to load', { failedUrl, code, description })
+    })
+    window.webContents.on('render-process-gone', (_event, details) => {
+      if (quitting || details.reason === 'clean-exit') return
+      console.error('desktop remote: renderer exited', details.reason)
+    })
+    window.on('close', (event) => {
+      if (quitting || shellInstallerOwnsQuit || sessionEnding) return
+      event.preventDefault()
+      if (updateDialog.isOpen) { updateDialog.focus(); return }
+      const hide = (): void => {
+        if (!quitting && !shellInstallerOwnsQuit && !sessionEnding && !window.isDestroyed()) hideMainWindow(window)
+      }
+      if (backgroundNotice === undefined) hide()
+      else backgroundNotice.close(hide)
+    })
+    if (process.platform === 'win32') {
+      window.on('session-end', () => { sessionEnding = true })
+    } else {
+      window.on('focus', () => { sessionEnding = false })
+      window.on('show', () => { sessionEnding = false })
+    }
+    window.on('closed', () => { if (mainWindow === window) mainWindow = undefined })
+    window.on('focus', automaticCheck)
+    try {
+      await window.loadURL(url)
+      if (!quitting && !window.isDestroyed()) {
+        window.show()
+        window.focus()
+      }
+    } catch (error) {
+      // A certificate refusal is explained by the certificate-error handler; anything else is this
+      // dialog, because a remote Host that cannot load must not look like a blank page.
+      if (errorCode(error)?.startsWith('ERR_CERT') !== true) {
+        console.error('desktop remote: the remote Host could not be opened', error)
+        await dialog.showMessageBox({
+          type: 'error',
+          title: locale.messages.lifecycleRemoteFailedTitle,
+          message: locale.messages.lifecycleRemoteFailedTitle,
+          detail: formatDesktopMessage(locale.messages.lifecycleRemoteFailedDetail, { url, error: describeError(error) }),
+          buttons: [locale.messages.updateAcknowledge],
+          cancelId: 0,
+        }).catch(() => undefined)
+      }
+      if (!quitting && !window.isDestroyed()) {
+        window.show()
+        window.focus()
+      }
+    }
+  }
+  /**
+   * Answer the Caddy gateway's Basic challenge: reuse this run's credentials, or ask for them.
+   * A repeat within five seconds means the gateway refused them, so the form reopens with an error
+   * and a bounded number of attempts.
+   */
+  app.on('login', (event, webContents, details, authInfo, callback) => {
+    if (mainWindow === undefined || webContents !== mainWindow.webContents) return
+    if (authInfo.isProxy || remoteOrigin === undefined || !sameRemoteOrigin(details.url, remoteOrigin)) return
+    event.preventDefault()
+    const origin = remoteOrigin
+    const known = remoteCredentials.get(origin)
+    const last = remoteLoginAt.get(origin) ?? 0
+    const rejected = known !== undefined && Date.now() - last < 5_000
+    remoteLoginAt.set(origin, Date.now())
+    if (known !== undefined && !rejected) {
+      remoteLoginAt.set(origin, Date.now())
+      callback(known.username, known.password)
+      return
+    }
+    if (remoteLoginPrompt !== undefined) {
+      void remoteLoginPrompt.then(() => {
+        const current = remoteCredentials.get(origin)
+        if (current === undefined) callback()
+        else callback(current.username, current.password)
+      }, () => { callback() })
+      return
+    }
+    const failures = (remoteLoginFailures.get(origin) ?? 0) + (rejected ? 1 : 0)
+    remoteLoginFailures.set(origin, failures)
+    if (failures > 3) {
+      console.warn('desktop remote: too many rejected gateway credentials')
+      callback()
+      return
+    }
+    remoteCredentials.delete(origin)
+    const suggestedUsername = known?.username
+    remoteLoginPrompt = (async () => {
+      const credentials = await promptRemoteCredentials(origin, rejected, suggestedUsername)
+      if (credentials === undefined) {
+        callback()
+        return
+      }
+      remoteCredentials.set(origin, credentials)
+      remoteLoginAt.set(origin, Date.now())
+      callback(credentials.username, credentials.password)
+    })().catch(() => { callback() }).finally(() => { remoteLoginPrompt = undefined })
+  })
+  /**
+   * The documented gateway uses a private local CA. Import that CA into the system trust store; the
+   * shell refuses the certificate rather than teaching the app to ignore it.
+   */
+  app.on('certificate-error', (event, webContents, url, error, _certificate, callback) => {
+    if (mainWindow === undefined || webContents !== mainWindow.webContents) return
+    if (remoteOrigin === undefined || !sameRemoteOrigin(url, remoteOrigin)) return
+    event.preventDefault()
+    callback(false)
+    if (remoteCertificateReported) return
+    remoteCertificateReported = true
+    void dialog.showMessageBox({
+      type: 'error',
+      title: locale.messages.lifecycleRemoteCertificateTitle,
+      message: locale.messages.lifecycleRemoteCertificateTitle,
+      detail: formatDesktopMessage(locale.messages.lifecycleRemoteCertificateDetail, { origin: remoteOrigin, error }),
+      buttons: [locale.messages.updateAcknowledge],
+      cancelId: 0,
+    }).catch(() => undefined)
+  })
   focusPrimaryWindow = () => {
     if (quitting) return
     if (isMandatory()) { mandatoryUI?.focus(); return }
@@ -1656,6 +2009,7 @@ async function main(): Promise<void> {
   const finishQuit = (stopHost = true, inspection: DesktopQuitInspection | 'unknown' = 'unknown'): void => {
     quitting = true
     shuttingDown = true
+    remoteScanAbort?.abort()
     stopPlatformSessionPoll?.()
     stopPlatformSessionPoll = undefined
     void launchWindow?.close().catch(() => undefined)
@@ -1663,7 +2017,8 @@ async function main(): Promise<void> {
       writeLifecycleState(restorePath, {
         version: LIFECYCLE_STATE_VERSION,
         quitAt: new Date().toISOString(),
-        stopHost,
+        // A remote workspace owns no local Host, so the next launch has nothing to reconnect to.
+        stopHost: remoteOrigin === undefined ? stopHost : false,
         interrupted: inspection === 'unknown' ? null : inspection,
         window: captureMainWindow(),
       })
@@ -1761,8 +2116,15 @@ async function main(): Promise<void> {
   }
   automaticCheck()
   await resolveLaunchPlan()
-  await reconcileBackend().catch(() => undefined)
-  await launchWindow?.close().catch(() => undefined)
+  const remotePlan = nextHostPlan?.kind === 'remote' ? nextHostPlan : undefined
+  if (remotePlan !== undefined) {
+    nextHostPlan = undefined
+    await launchWindow?.close().catch(() => undefined)
+    await openRemoteWorkspace(remotePlan)
+  } else {
+    await reconcileBackend().catch(() => undefined)
+    await launchWindow?.close().catch(() => undefined)
+  }
   // Window lifecycle callbacks run while backend startup is pending.
   if (isQuitting()) return
   const window = currentMainWindow()
