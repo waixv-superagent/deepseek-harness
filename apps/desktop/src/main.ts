@@ -577,6 +577,7 @@ async function main(): Promise<void> {
         const cookie = await authenticateWebHost(ready.url)
         hostCookie = cookie
         hostUrl = ready.url
+        tray?.relabel()
         void removeLegacyHostCookies(session.defaultSession.cookies, ready.url)
           .catch((error: unknown) => { console.error('desktop: legacy Host cookie cleanup failed', error) })
         if (ready.injections === undefined) throw new Error('Desktop Host did not provide boot injections')
@@ -1250,6 +1251,11 @@ async function main(): Promise<void> {
     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
     try {
       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
+        hostStatus: () => {
+          if (quitting || shuttingDown) return { state: 'stopped' as const }
+          if (hostUrl === undefined) return { state: 'starting' as const }
+          try { return { state: 'running' as const, detail: new URL(hostUrl).host } } catch { return { state: 'running' as const } }
+        },
         open: () => { focusPrimaryWindow() }, quit: () => { app.quit() } })
     } catch (error) { console.warn('desktop tray: unavailable', error) }
   }
