@@ -190,7 +190,7 @@ it.each([false, true])('unpacks PE files through builder source patterns (extern
 it.each([false, true])('unpacks streamed chat assets through builder source patterns (external=%s)', async (external) => {
   const input = await fixture(external)
   await prepareWindowsAsarUnpack(input.context, input.source)
-  expect(input.config.asarUnpack).toEqual(expect.arrayContaining(WINDOWS_ASAR_ASSET_PATTERNS))
+  expect(input.config.asarUnpack).toEqual(expect.arrayContaining([...WINDOWS_ASAR_ASSET_PATTERNS]))
   await packageFixture(input)
   const archive = await readAsar(join(input.resources, 'app.asar'))
   const path = join('dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-chat', 'lib', 'assets', 'running-whale@2x-fixture.png')
