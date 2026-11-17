@@ -29,6 +29,7 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
+import { resolveRemoteWebTarget } from './remote-web.ts'
 import { DesktopProjectManager } from './project-manager.ts'
 import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError, type DesktopQuitInspection } from './host-process.ts'
 import { DesktopServiceHost } from './host-service.ts'
@@ -278,7 +279,14 @@ function platformLoginUrl(authorizeUrl: string): string {
 /** Window rectangle saved by the last quit; the next primary window opens where the person left it. */
 let restoredMainWindowBounds: LifecycleWindowBounds | undefined
 
-function createWindow(preload: string, show = false, primary = false): BrowserWindow {
+/**
+ * Build one application window.
+ * @param preload - Renderer preload for the bundled Host's shell page; absent for a remote Web host.
+ * @param show - Whether the window is visible on creation.
+ * @param primary - Whether this is the application's main window.
+ * @returns The created window.
+ */
+function createWindow(preload: string | undefined, show = false, primary = false): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -291,14 +299,16 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
       }
       : {}),
     show,
-    ...(process.platform === 'win32' && primary ? {
+    // The integrated title bar belongs to the shell page, which pads for the caption; a page served
+    // by a remote Host keeps the native frame so its own layout stays sound.
+    ...(process.platform === 'win32' && primary && preload !== undefined ? {
       titleBarStyle: 'hidden' as const,
       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
         symbolColor: nativeTheme.shouldUseDarkColors ? '#f9fafb' : '#0f1115' },
     } : {}),
     // hiddenInset places traffic lights inside the sidebar; sidebar vibrancy
     // needs a transparent window background to show through the page.
-    ...(process.platform === 'darwin' ? {
+    ...(process.platform === 'darwin' && preload !== undefined ? {
       titleBarStyle: 'hiddenInset' as const,
       trafficLightPosition: { x: 16, y: 18 },
       vibrancy: 'sidebar' as const,
@@ -308,7 +318,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
       backgroundColor: '#00000000',
     } : {}),
     webPreferences: {
-      preload,
+      ...(preload === undefined ? {} : { preload }),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -385,8 +395,9 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
   window.webContents.on('will-navigate', (event, url) => {
     const destination = new URL(url)
     const current = new URL(window.webContents.getURL())
-    if (destination.protocol !== `${SCHEME}:`
-      && !(destination.protocol === 'http:' && destination.origin === current.origin)) {
+    // The shell page and a remote Web page both keep their own origin; anything else is external.
+    const sameOrigin = ['http:', 'https:'].includes(destination.protocol) && destination.origin === current.origin
+    if (destination.protocol !== `${SCHEME}:` && !sameOrigin) {
       event.preventDefault()
       if (['http:', 'https:'].includes(destination.protocol)) void shell.openExternal(url)
     }
@@ -415,6 +426,11 @@ async function main(): Promise<void> {
     ? developmentPrimaryRuntime()
     : join(process.resourcesPath, 'runtime', 'primary-runtime')
   const activeProject = paths.profile
+  // A deployment may keep its service in a separate DSH Web process. Display that process when it
+  // answers, and keep the bundled Host otherwise; a rejected configuration leaves the bundled Host
+  // selected rather than preventing the application from starting.
+  const remoteWeb = await resolveRemoteWebTarget({ env: process.env, profileDir: activeProject })
+    .catch((error: unknown) => { console.error('desktop remote web: ignoring the configuration', error); return undefined })
   const manager = new DesktopProjectManager(paths, resources)
   // Dock and Finder launches inherit only launchd's environment; every Host shares one login-shell read.
   const loginShellRead = new AbortController()
@@ -512,6 +528,9 @@ async function main(): Promise<void> {
   })
   const appPreload = fileURLToPath(new URL('./preload-app.cjs', import.meta.url))
   const applicationUrl = `${SCHEME}://app/`
+  // A remote Web host serves its own pages and boot injections, so the application shell page and
+  // its Host bridge apply only to the bundled Host.
+  const workspaceUrl = remoteWeb ?? applicationUrl
   let hostUrl: string | undefined
   let hostCookie: string | undefined
   const browserGuests = new DesktopBrowserGuests(() => hostUrl)
@@ -578,8 +597,12 @@ async function main(): Promise<void> {
         hostCookie = cookie
         hostUrl = ready.url
         tray?.relabel()
-        void removeLegacyHostCookies(session.defaultSession.cookies, ready.url)
-          .catch((error: unknown) => { console.error('desktop: legacy Host cookie cleanup failed', error) })
+        // Cookies ignore ports, so this cleanup removes every dsh-auth cookie for 127.0.0.1; a remote
+        // Host's session cookie must survive it, and stale local-host cookies do not affect that Host.
+        if (remoteWeb === undefined) {
+          void removeLegacyHostCookies(session.defaultSession.cookies, ready.url)
+            .catch((error: unknown) => { console.error('desktop: legacy Host cookie cleanup failed', error) })
+        }
         if (ready.injections === undefined) throw new Error('Desktop Host did not provide boot injections')
         injections = ready.injections
         void launchWindow?.close().catch((error: unknown) => { console.error('desktop lifecycle: could not close the launch window', error) })
@@ -700,7 +723,7 @@ async function main(): Promise<void> {
           if (quitting) return
           // A replacement Host can have a new port, cookie, or boot injections even at the same URL.
           navigation = undefined
-          await navigateMain(applicationUrl)
+          await navigateMain(workspaceUrl)
           if (backend.host !== undefined) updateJournal?.action('workspace-ready')
         })
         workspaceRecovery = recovery
@@ -726,7 +749,9 @@ async function main(): Promise<void> {
 
   const reconcileBackend = (): Promise<void> => {
     startup ??= (async () => {
-      await navigateMain(applicationUrl)
+      // The remote Host loads after its Host start returns, so a local cookie cleanup cannot erase
+      // the authentication cookie the remote page's first request sets.
+      if (remoteWeb === undefined) await navigateMain(applicationUrl)
       await backend.start(async () => {
         await Promise.all([manager.applyRelease(), prepareHostEnvironment()])
       })
@@ -1331,7 +1356,7 @@ async function main(): Promise<void> {
     }
   }
   const createMainWindow = (): BrowserWindow => {
-    const window = createWindow(appPreload, false, true)
+    const window = createWindow(remoteWeb === undefined ? appPreload : undefined, false, true)
     mainWindow = window
     browserGuests.bind(window, (guest, name) => shortcuts.attachGuest(window, guest, name))
     shortcuts.attach(window)
@@ -1381,7 +1406,7 @@ async function main(): Promise<void> {
   const enterWorkspace = async ({ activate = true }: { activate?: boolean } = {}): Promise<void> => {
     if (quitting) return
     const window = mainWindow ?? createMainWindow()
-    await navigateMain(applicationUrl)
+    await navigateMain(workspaceUrl)
     if (isQuitting() || recovery.active || window.isDestroyed()) return
     if (activate) window.show()
     else window.showInactive()
@@ -1403,6 +1428,8 @@ async function main(): Promise<void> {
   let openingWelcome: Promise<void> | undefined
   const showWelcome = (): Promise<void> => {
     if (quitting) return Promise.resolve()
+    // The remote Host owns its own sign-in; the bundled Host's welcome would cover its page.
+    if (remoteWeb !== undefined) return Promise.resolve()
     if (welcomeWindow !== undefined && !welcomeWindow.isDestroyed()) {
       if (!welcomeWindow.isVisible()) void track('auth_page_view', {})
       welcomeWindow.show()
@@ -1464,6 +1491,11 @@ async function main(): Promise<void> {
   }
   const openInitialWindow = async (): Promise<void> => {
     if (quitting || recovery.active) return
+    if (remoteWeb !== undefined) {
+      // The remote Host supplies its own welcome, locale, and account state.
+      await enterWorkspace()
+      return
+    }
     const state = await readWelcomeState()
     if (isQuitting() || backend.state.phase !== 'ready') return
     locale = resolveDesktopStartupLocale(state.localePreference, systemLanguages)
@@ -1574,7 +1606,7 @@ async function main(): Promise<void> {
     const window = welcomeWindow ?? mainWindow
     if (window === undefined || window.isDestroyed()) {
       try { createMainWindow() } catch (error) { reportFatal(error, 'main'); return }
-      void (backend.state.phase === 'ready' ? openInitialWindow() : navigateMain(applicationUrl)).catch((error: unknown) => { reportFatal(error, 'main') })
+      void (backend.state.phase === 'ready' ? openInitialWindow() : navigateMain(workspaceUrl)).catch((error: unknown) => { reportFatal(error, 'main') })
       return
     }
     // Startup and sign-out select the visible window before activation may reveal the workspace.
