@@ -8,19 +8,29 @@ afterEach(async () => {
   server = undefined
 })
 
-function operations(): DesktopControlOperations & { shutdown: ReturnType<typeof vi.fn> } {
+/** A fake operation set plus the shutdown mock the endpoint test asserts on. */
+interface FakeOperations {
+  readonly operations: DesktopControlOperations
+  readonly shutdown: ReturnType<typeof vi.fn>
+}
+
+function operations(): FakeOperations {
+  const shutdown = vi.fn()
   return {
-    inspect: async () => ({ activeTasks: true, scheduledTasks: false }),
-    updateTasks: async action => action === 'inspect',
-    dragResource: async () => ({ path: 'C:/work/a.png', sha256: 'a'.repeat(64), size: 3 }),
-    platformSession: () => ({ origin: 'https://platform.example', token: 'token' }),
-    shutdown: vi.fn(),
+    operations: {
+      inspect: async () => ({ activeTasks: true, scheduledTasks: false }),
+      updateTasks: async action => action === 'inspect',
+      dragResource: async () => ({ path: 'C:/work/a.png', sha256: 'a'.repeat(64), size: 3 }),
+      platformSession: () => ({ origin: 'https://platform.example', token: 'token' }),
+      shutdown,
+    },
+    shutdown,
   }
 }
 
-async function start(): Promise<{ base: string; token: string; ops: ReturnType<typeof operations> }> {
+async function start(): Promise<{ base: string; token: string; ops: FakeOperations }> {
   const ops = operations()
-  server = await startDesktopControlServer(ops)
+  server = await startDesktopControlServer(ops.operations)
   return { base: `http://127.0.0.1:${String(server.port)}`, token: server.token, ops }
 }
 
@@ -47,7 +57,7 @@ describe('desktop Host control endpoint', () => {
     expect(await (await authenticated(base, token, '/platform-session')).json()).toEqual({
       session: { origin: 'https://platform.example', token: 'token' },
     })
-    expect(ops.updateTasks).toBeTypeOf('function')
+    expect(ops.operations.updateTasks).toBeTypeOf('function')
   })
 
   it('authorizes one Session-scoped drag resource', async () => {
