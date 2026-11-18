@@ -87,6 +87,7 @@ const harness = await vi.hoisted(async () => {
       insertCSS: vi.fn(async () => 'blur'),
       removeInsertedCSS: vi.fn(async () => {}),
       openDevTools: vi.fn(),
+      toggleDevTools: vi.fn(),
       getURL: () => this.urls.at(-1) ?? '',
       mainFrame: { url: '' },
       getZoomFactor: () => 1,
@@ -218,7 +219,7 @@ const harness = await vi.hoisted(async () => {
     failWindow(error: Error) { windowFailure = error },
     windows, views, hosts, handlers, app, FakeWindow, FakeView, FakeHost, powerMonitor, nativeTheme, analytics,
     trays, FakeTray, backgroundNotice, shellDialog,
-    menu, popup, socketHeaders: vi.fn(), connectWelcome: vi.fn(), removeLegacyHostCookies: vi.fn(async () => {}), hostCookies: {},
+    menu, popup, globalShortcut: { register: vi.fn(), unregister: vi.fn() }, socketHeaders: vi.fn(), connectWelcome: vi.fn(), removeLegacyHostCookies: vi.fn(async () => {}), hostCookies: {},
     loginShell, readLoginShell, updateCheck, updateDownload, updateInstall,
     platformDispose,
     platformCloseAndWait,
@@ -320,6 +321,7 @@ vi.mock('electron', () => ({
     removeHandler: (channel: string) => { harness.handlers.delete(channel) },
   },
   Menu: { setApplicationMenu: harness.menu.setApplicationMenu, buildFromTemplate: harness.menu },
+  globalShortcut: harness.globalShortcut,
   session: { defaultSession: {
     on: vi.fn(), cookies: harness.hostCookies,
     setPermissionCheckHandler: vi.fn(), setPermissionRequestHandler: vi.fn(), webRequest: { onBeforeSendHeaders: harness.socketHeaders },
@@ -803,6 +805,16 @@ describe('desktop main startup', () => {
     expect((await handler(new Request('dsh-app://unknown/update-dialog.html'))).status).toBe(404)
   })
 
+  it('removes the native menu bar on Windows and keeps F12 for developer tools', async () => {
+    vi.stubGlobal('process', { ...process, platform: 'win32' })
+    await readyForUpdate()
+    expect(harness.menu.setApplicationMenu).toHaveBeenLastCalledWith(null)
+    const registration = harness.globalShortcut.register.mock.calls.find(([accelerator]) => accelerator === 'F12')
+    expect(registration).toBeDefined()
+    ;(registration![1] as () => void)()
+    expect(harness.windows[0]!.webContents.toggleDevTools).toHaveBeenCalledOnce()
+  })
+
   it.each(([
     ['darwin', 'en'], ['darwin', 'zh-CN'], ['win32', 'en'], ['win32', 'zh-CN'], ['linux', 'en'], ['linux', 'zh-CN'],
   ] as const).flatMap(([platform, locale]) => [
@@ -827,10 +839,8 @@ describe('desktop main startup', () => {
       { role: 'toggleDevTools', label: messages.toggleDevToolsMenu },
     ])
     if (platform === 'win32') {
-      expect(harness.menu.mock.calls[0]![0]).toEqual([
-        { role: 'toggleDevTools', visible: false },
-        { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
-      ])
+      expect(harness.menu.setApplicationMenu).toHaveBeenLastCalledWith(null)
+      expect(harness.globalShortcut.register).toHaveBeenCalledWith('F12', expect.any(Function))
       expect(menu.every(item => item.visible !== false)).toBe(true)
     } else {
       expect(menu.filter(item => item.visible === false)).toEqual([
@@ -1159,10 +1169,8 @@ describe('desktop main startup', () => {
     } else if (platform === 'win32') {
       expect(window.options).toMatchObject({ titleBarStyle: 'hidden', titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT } })
       expect(window.options).not.toHaveProperty('vibrancy')
-      expect(harness.menu.mock.calls[0]![0]).toEqual([
-        { role: 'toggleDevTools', visible: false },
-        { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
-      ])
+      expect(harness.menu.setApplicationMenu).toHaveBeenLastCalledWith(null)
+      expect(harness.globalShortcut.register).toHaveBeenCalledWith('F12', expect.any(Function))
     } else {
       expect(window.options).not.toHaveProperty('titleBarStyle')
       expect(window.options).not.toHaveProperty('vibrancy')
