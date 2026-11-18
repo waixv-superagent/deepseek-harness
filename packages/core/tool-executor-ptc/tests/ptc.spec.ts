@@ -17,7 +17,7 @@ import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcRunFailure, PtcRunRequest, PtcRunResult } from '@deepseek-ai/dsh-ptc-runtime'
 import ToolRuntime, { RUN_CODE_NAME, TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH, defineTool } from '@deepseek-ai/dsh-tools'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
-import type { JsonSchemaNode, PostToolDecision, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { JsonSchemaNode, PostToolDecision, ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentCancelCause } from '@deepseek-ai/dsh-agent'
 import SessionStore, { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import ApprovalService, { type ApprovalOutcome, type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
@@ -66,6 +66,7 @@ class FakeRuntime extends PtcRuntime {
 interface SetupOptions {
   mode?: 'native' | 'ptc'
   maxParallelSubCalls?: number
+  lazyTools?: string[]
   runtime?: false | { language?: string }
   toolOrder?: string[]
 }
@@ -75,14 +76,17 @@ async function setup(options: SetupOptions = {}) {
   provideWorkingDirectoryFixture(ctx)
   await ctx.plugin(SystemPrompt, { ...options.toolOrder ? { toolOrder: options.toolOrder } : {} })
   await ctx.plugin(ToolRuntime)
-  const executor = options.mode === 'native' ? new NativeToolExecutor(ctx) : new PtcExecutor(ctx, { ...options.maxParallelSubCalls !== undefined ? { maxParallelSubCalls: options.maxParallelSubCalls } : {} })
+  const executor = options.mode === 'native' ? new NativeToolExecutor(ctx) : new PtcExecutor(ctx, {
+    ...options.maxParallelSubCalls !== undefined ? { maxParallelSubCalls: options.maxParallelSubCalls } : {},
+    ...options.lazyTools !== undefined ? { lazyTools: options.lazyTools } : {},
+  })
   ctx.tools.setExecutor(executor)
   let runtime: FakeRuntime | undefined
   if (options.runtime !== false) {
     await ctx.plugin(FakeRuntime, options.runtime ?? {})
     runtime = ctx.ptcRuntime as FakeRuntime
   }
-  return { ctx, tools: {
+  return { ctx, executor, tools: {
     get: (name: string, scope?: ScopeKey) => executor instanceof PtcExecutor && name === RUN_CODE_NAME ? executor['requirePtcTransport']() : ctx.tools.get(name, scope),
     execute: (input: ToolExecutionInput) => executeCall(ctx, input),
   }, systemPrompt: ctx.systemPrompt, runtime: runtime! }
@@ -2168,7 +2172,7 @@ describe('the run_code dispatch bridge', () => {
     // The name IS declared to this model, so a bare `unknown tool` reads as a
     // broken deployment. The denial carries the route instead.
     expect(result.error?.message).toBe(
-      `unknown tool "write": only \`${RUN_CODE_NAME}\` is callable directly — call \`write\` from inside a \`${RUN_CODE_NAME}\` program instead`,
+      `unknown tool "write": \`write\` is not callable directly — call it from inside a \`${RUN_CODE_NAME}\` program instead`,
     )
   })
 
@@ -2711,4 +2715,110 @@ it.each([
     await Promise.allSettled([pending])
     await ctx.fiber.dispose()
   }
+})
+
+describe('compact (lazy) SDK declarations', () => {
+  /** Register a server-qualified tool whose schema would be large in native form. */
+  function registerMcpSearch(ctx: Context): void {
+    ctx.tools.register(defineTool({
+      name: 'mcp__srv__search',
+      description: 'Search one remote corpus.',
+      parameters: {
+        query: { type: 'string', required: true, description: 'Search text.' },
+        limit: { type: 'integer' },
+      },
+      output: {
+        schema: { type: 'array', items: { type: 'string' } },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      execute: async args => [`${args.query}:${args.limit ?? 0}`],
+    }))
+  }
+
+  /** Read one executor section's text at this step's visible definitions. */
+  function sectionText(executor: PtcExecutor, name: string, definitions: readonly ToolDefinition[]): string {
+    const section = executor.sections.find(candidate => candidate.name === name)
+    if (section === undefined) throw new Error(`missing section ${name}`)
+    return typeof section.text === 'function' ? section.text(definitions) : section.text
+  }
+
+  it('keeps configured tools compact, exposes describe_tools, and leaves other tools full', async () => {
+    const { ctx, executor } = await setup({ mode: 'ptc', lazyTools: ['mcp__*'] })
+    try {
+      expect(executor).toBeInstanceOf(PtcExecutor)
+      const ptc = executor as PtcExecutor
+      registerEcho(ctx)
+      registerMcpSearch(ctx)
+      const definitions = ctx.tools.definitions()
+
+      expect(ptc.describe(definitions).knownNames).toEqual([RUN_CODE_NAME, PtcToolExecutor.DESCRIBE_TOOLS_NAME])
+      const sdk = sectionText(ptc, 'tools:sdk', definitions)
+      expect(sdk).toContain('mcp__srv__search: JsonValue;')
+      expect(sdk).not.toContain('query: string')
+      expect(sdk).toContain('value: string;')
+      expect(sdk).toContain('Some declarations above are compact')
+      expect(sectionText(ptc, 'tools:ptc-only', definitions)).toContain(PtcToolExecutor.DESCRIBE_TOOLS_NAME)
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('serves one exact contract through describe_tools and rejects an unknown name', async () => {
+    const { ctx } = await setup({ mode: 'ptc', lazyTools: ['mcp__*'] })
+    try {
+      registerMcpSearch(ctx)
+      const described = await executeCall(ctx, {
+        signal: testToolSignal,
+        callId: ToolCallId('describe-contract'),
+        name: PtcToolExecutor.DESCRIBE_TOOLS_NAME,
+        arguments: { name: 'mcp__srv__search' },
+      })
+      expect(described.isError).toBe(false)
+      if (described.isError) return
+      const value = described.value as {
+        name: string
+        description: string
+        parameters: { properties?: Record<string, { type?: string }> }
+        output: { type?: string }
+      }
+      expect(value.name).toBe('mcp__srv__search')
+      expect(value.description).toBe('Search one remote corpus.')
+      expect(value.parameters.properties?.query?.type).toBe('string')
+      expect(value.output.type).toBe('array')
+      const describedText = described.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      expect(describedText).toContain('"query"')
+
+      const missing = await executeCall(ctx, {
+        signal: testToolSignal,
+        callId: ToolCallId('describe-missing'),
+        name: PtcToolExecutor.DESCRIBE_TOOLS_NAME,
+        arguments: { name: 'not_a_tool' },
+      })
+      expect(missing.isError).toBe(true)
+      if (missing.isError) expect(missing.error.message).toContain('not visible')
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('renders compact declarations in the loaded Python runtime language', async () => {
+    const { ctx, executor } = await setup({ mode: 'ptc', lazyTools: ['mcp__*'], runtime: { language: 'python' } })
+    try {
+      registerMcpSearch(ctx)
+      const sdk = sectionText(executor as PtcExecutor, 'tools:sdk', ctx.tools.definitions())
+      expect(sdk).toContain('Some declarations above are compact')
+      expect(sdk).toContain(PtcToolExecutor.DESCRIBE_TOOLS_NAME)
+      expect(sdk).not.toContain('query')
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('leaves the default surface unchanged when no pattern is configured', async () => {
+    const { ctx, executor } = await setup({ mode: 'ptc' })
+    try {
+      registerMcpSearch(ctx)
+      const definitions = ctx.tools.definitions()
+      const ptc = executor as PtcExecutor
+      expect(ptc.describe(definitions).knownNames).toEqual([RUN_CODE_NAME])
+      const sdk = sectionText(ptc, 'tools:sdk', definitions)
+      expect(sdk).toContain('query: string')
+      expect(sdk).not.toContain('Some declarations above are compact')
+      expect(sectionText(ptc, 'tools:ptc-only', definitions)).not.toContain(PtcToolExecutor.DESCRIBE_TOOLS_NAME)
+    } finally { await ctx.fiber.dispose() }
+  })
 })

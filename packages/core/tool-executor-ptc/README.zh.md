@@ -35,6 +35,8 @@ kind: "package-reference"
 
 根 `run_code` 调用是独占调用，按串行执行。`maxParallelSubCalls` 限制每个程序中并行安全的嵌套调用数，默认值为 `10`；值必须是正整数，`1` 表示串行执行。独占调用构成屏障。
 
+`lazyTools` 接受工具名模式（`*` 匹配任意长度字符，`?` 匹配一个字符），匹配到的声明保持紧凑：参数与结果使用通用的 `JsonValue` 类型，不再内联 schema。只要至少一个可见工具匹配，执行器还会公开 `describe_tools`，按需返回某个工具的描述、输入 JSON Schema 与输出 JSON Schema。留空（默认值）时生成完整的全 schema SDK；例如 `lazyTools: ['mcp__*']` 会让所有已配置的 MCP 工具保持紧凑。
+
 本包将 `ctx.ptcRuntime` 和 `ctx.systemPrompt` 声明为必需注入；带 Agent 的程序要求 `ctx.workingDirectory`。执行器在运行时可用后才激活，并在运行时卸载时撤回。启用 PTC 执行器但未提供运行时会阻止应用启动。已撤回的 PTC 选择不会回退到原生执行。
 
 共享分派事件与 `ptc-mode` 消息来源声明位于 `@deepseek-ai/dsh-tool-executor-ptc/types`；Client 代码通过 `@deepseek-ai/dsh-tool-executor-ptc/client` 导入同一组声明。两个入口都不引入 Host 服务声明。Host 策略扩展通过包主入口的 `import type` 获取 `PtcDispatchLog` 与 `tools/ptc-dispatch-log`，无需挂载执行器。
@@ -85,7 +87,7 @@ PTC 执行器公开保留的 `run_code` 传输以及按所加载运行时语言�
 
 #### 模型看到什么
 
-PTC mode 会公开生成的 [`run_code` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-executor-ptc)、下方 SDK 说明，以及按所加载运行时语言生成的精确 SDK 块。两种运行时语言都将 `code` 列在 `description` 前；这是呈现顺序，不强制 JSON 成员顺序。REPL 与 Script 运行时共用通用工具描述和 SDK 说明；语法与状态规则由各自的 `executionInstructions` 提供。TypeScript bash 示例对函数体运行时返回值，对 REPL 和 Script 运行时打印输出。说明将生成声明明确标为只能在程序内使用的绑定。当当前 `bash` 参数 schema 接受示例参数时，说明还会给出以 `run_code` 包住 `tools.bash(...)` 的完整调用。`tools:sdk` 段使用 first-party 顺序 5000，并关闭提示词变量插值，使两种运行时语言都原样保留工具描述和 schema 中的 `{{…}}` 文本。在 `ptc` 下，提示词还会带上处于更早 first-party 顺序的 `tools:ptc-only` 规则，让模型先读到「可以调用哪些工具」再读「每个工具做什么」。
+PTC mode 会公开生成的 [`run_code` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-executor-ptc)、下方 SDK 说明，以及按所加载运行时语言生成的精确 SDK 块。两种运行时语言都将 `code` 列在 `description` 前；这是呈现顺序，不强制 JSON 成员顺序。REPL 与 Script 运行时共用通用工具描述和 SDK 说明；语法与状态规则由各自的 `executionInstructions` 提供。TypeScript bash 示例对函数体运行时返回值，对 REPL 和 Script 运行时打印输出。说明将生成声明明确标为只能在程序内使用的绑定。当当前 `bash` 参数 schema 接受示例参数时，说明还会给出以 `run_code` 包住 `tools.bash(...)` 的完整调用。`tools:sdk` 段使用 first-party 顺序 5000，并关闭提示词变量插值，使两种运行时语言都原样保留工具描述和 schema 中的 `{{…}}` 文本。在 `ptc` 下，提示词还会带上处于更早 first-party 顺序的 `tools:ptc-only` 规则，让模型先读到「可以调用哪些工具」再读「每个工具做什么」。当至少一个可见工具匹配 `lazyTools` 时，其声明保持 `JsonValue` 参数与结果类型，段落末尾附上紧凑声明说明；`tools:ptc-only` 规则会点名 `describe_tools`，其 schema 与 `run_code` 一起公开。`describe_tools` 以格式化 JSON 返回所选工具的描述与输入/输出 JSON Schema。
 
 ##### 带 bash 的 TypeScript PTC mode SDK 说明
 
@@ -121,6 +123,7 @@ Program-only SDK bindings:
 以下约束适用于已开始的调用。
 
 - **PTC mode 的 SDK 语言由当前加载的运行时决定，且呈现方式按 agent 而非按工具**：PTC 会拒绝组装提示词，除非 `ctx.ptcRuntime.language` 有已注册的 SDK 渲染器；同一个 agent 内不能让一个工具仅使用 Native，而另一个仅使用 PTC。
+- **紧凑声明把精确 schema 推迟到 `describe_tools`**：程序自行猜测紧凑绑定的参数时，仍会在嵌套调用的 schema 校验处失败，且 PTC mode 在执行前不做类型检查。
 - **PTC mode 中间值只存在于执行局部，且没有字节上限**：它们无法从会话回放重建，并可能耗尽进程或 worker 内存；只有外层 `run_code` 输出受 worker 可配置的硬上限约束。
 - **状态由运行时决定**：默认后端每次重新开始；Node REPL 和启用 `scriptPersistence: true` 的 Script 模式按存活 Agent 保留内存。Agent 销毁时等待环境释放。重启与执行失败可能清除内存；模型说明会指导重新创建缺失变量。程序与结果仍写入 Session 日志，不序列化运行中的对象。
 
