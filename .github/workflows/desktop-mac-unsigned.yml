@@ -12,22 +12,14 @@ concurrency:
 
 jobs:
   package:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-14
-          - arch: x64
-            runner: macos-13
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14
     timeout-minutes: 120
     defaults:
       run:
         shell: bash
     env:
       DSH_DESKTOP_TARGET_PLATFORM: darwin
-      DSH_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+      DSH_DESKTOP_TARGET_ARCH: arm64
       DSH_TELEMETRY_DISABLED: '1'
     steps:
       - uses: actions/checkout@v4
@@ -42,14 +34,14 @@ jobs:
       - name: Build workspace libraries
         run: pnpm run build:lib
       - name: Build the unsigned installer
-        run: pnpm run package:desktop:mac:${{ matrix.arch }}:unsigned
+        run: pnpm run package:desktop:mac:arm64:unsigned
       - name: Retain the unsigned app
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-mac-${{ matrix.arch }}-unsigned
+          name: desktop-mac-arm64-unsigned
           include-hidden-files: true
           path: |
-            apps/desktop/.desktop-build/targets/mac-${{ matrix.arch }}/unsigned-artifacts/**
+            apps/desktop/.desktop-build/targets/mac-arm64/unsigned-artifacts/**
             apps/desktop/.desktop-build/packaging-runs/**
           if-no-files-found: error
           retention-days: 7
