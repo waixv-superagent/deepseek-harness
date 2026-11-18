@@ -18,6 +18,32 @@ vi.mock('node:fs/promises', async importOriginal => ({
 }))
 
 describe('installer preparation preserves application dependencies', () => {
+  it.each(['win32', 'darwin'] as const)('ships every window preload on %s', async (platform) => {
+    const env = {
+      DSH_DESKTOP_APP_ID: 'com.example.preloads',
+      DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN: 'https://policy.example.com',
+      DSH_DESKTOP_MANDATORY_UPDATE_CONFIG: JSON.stringify({ allowedAuthOrigins: ['https://login.example.com'] }),
+      DSH_DESKTOP_TARGET_PLATFORM: platform,
+      DSH_DESKTOP_TARGET_ARCH: 'x64',
+      DSH_DESKTOP_UNSIGNED: platform === 'win32' ? '1' : '0',
+      DSH_DESKTOP_MACOS_SIGNING_IDENTITY: 'Example Company (TEAMID1234)',
+      DSH_DESKTOP_MACOS_TEAM_ID: 'TEAMID1234',
+      APPLE_KEYCHAIN_PROFILE: 'installer-test',
+      DOWNLOAD_TEST_ORIGIN: 'https://desktop-updates.example.com',
+      DOWNLOAD_TEST_RELEASE_ID: '0123456789abcdef0123456789abcdef',
+    }
+    for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value)
+    try {
+      const { createElectronBuilderConfig } = await import('../electron-builder.config.mjs')
+      const config = createElectronBuilderConfig(env, platform, 'x64')
+      const files = Array.from(config.files as readonly unknown[]).filter((file): file is string => typeof file === 'string')
+      for (const name of ['app', 'lifecycle', 'mandatory', 'platform-account', 'update-dialog', 'welcome']) {
+        expect(files).toContain(`lib/preload-${name}.cjs`)
+      }
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
   it.each(['win32', 'darwin'] as const)('rejects a missing production policy before signing on %s', async (platform) => {
     const { createElectronBuilderConfig } = await import('../scripts/electron-builder-config.mjs')
     expect(() => createElectronBuilderConfig({ DSH_DESKTOP_APP_ID: 'com.example.installer',
