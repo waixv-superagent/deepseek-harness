@@ -16,6 +16,7 @@ import {
   BrowserWindow,
   clipboard,
   dialog,
+  globalShortcut,
   ipcMain,
   Menu,
   powerMonitor,
@@ -1302,16 +1303,20 @@ async function main(): Promise<void> {
       : process.platform === 'win32' ? { label: currentDesktopLocale().messages.exitApplication } : {}) },
   ]
   const devToolsF12Shortcut: MenuItemConstructorOptions = { role: 'toggleDevTools', visible: false, accelerator: 'F12' }
-  const windowsDevToolsShortcuts: MenuItemConstructorOptions[] = [
-    { role: 'toggleDevTools', visible: false },
-    devToolsF12Shortcut,
-  ]
   const refreshApplicationMenu = (): void => {
-    Menu.setApplicationMenu(Menu.buildFromTemplate(process.platform === 'win32'
-      ? windowsDevToolsShortcuts : [{
+    if (process.platform === 'win32') {
+      // The Windows shell draws its own title bar. A native menu bar would show the
+      // shortcut-only devtools entries as two "Toggle Developer Tools" titles, so keep
+      // the window chrome clean and bind F12 as a global shortcut instead.
+      Menu.setApplicationMenu(null)
+      globalShortcut.unregister('F12')
+      globalShortcut.register('F12', () => { mainWindow?.webContents.toggleDevTools() })
+    } else {
+      Menu.setApplicationMenu(Menu.buildFromTemplate([{
         label: darwin ? app.name : currentDesktopLocale().messages.application,
         submenu: [...applicationItems(), devToolsF12Shortcut],
       }, ...platformMenus()]))
+    }
     tray?.relabel()
   }
   refreshApplicationMenu()
